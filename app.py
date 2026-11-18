@@ -163,8 +163,15 @@ def asignar_municipio(lon, lat, nombres, geoms):
     return salida
 
 
+def firma_listas():
+    if not CARPETA_LISTAS.exists():
+        return ()
+    return tuple((p.name, p.stat().st_mtime) for p in sorted(CARPETA_LISTAS.glob("*.csv")))
+
+
 @st.cache_data
-def preparar(depto, firma, incluir_unergy):
+def preparar(depto, firma, incluir_unergy, firma_l):
+    """firma y firma_l cambian cuando cambian los Excel o las listas, para recalcular."""
     df, meta = cargar_gbif(depto)
     unergy_todo, avisos = cargar_inventarios(firma)
     unergy = None
@@ -344,7 +351,7 @@ with st.sidebar:
                                       "comparar; la unidad se muestra en gris.")
         archivo_proy = st.file_uploader("Proyectos (CSV con nombre, lat, lon)", type="csv")
 
-df, meta, unergy, avisos = preparar(depto, firma, incluir_unergy)
+df, meta, unergy, avisos = preparar(depto, firma, incluir_unergy, firma_listas())
 
 with st.sidebar:
     if unergy is None:
