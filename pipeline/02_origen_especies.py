@@ -7,7 +7,7 @@ qué dicen las listas de distribución sobre Colombia (GRIIS Colombia, Catálogo
 Plantas de Colombia, etc.).
 
 Correr desde la carpeta del repo:
-    pip install requests
+    pip install requests h3 openpyxl pyproj
     python pipeline/02_origen_especies.py
 
 Tarda unos minutos. Si se interrumpe, al volver a correrlo sigue donde iba.
@@ -91,6 +91,17 @@ def clasificar(especie, reino):
 
 def main():
     reg = pd.read_parquet(ENTRADA, columns=["species", "grupo"])
+    # Sumar las especies de los inventarios de Unergy (data/unergy/*.xlsx), si hay
+    try:
+        import sys
+        sys.path.insert(0, ".")
+        from unergy import cargar_unergy
+        inv, _ = cargar_unergy("data/unergy")
+        if inv is not None:
+            reg = pd.concat([reg, inv[["species", "grupo"]]], ignore_index=True)
+            print(f"Especies de inventarios Unergy incluidas: {inv['species'].nunique():,}")
+    except Exception as e:
+        print(f"(No se pudieron leer los inventarios Unergy: {e})")
     especies = (reg.drop_duplicates("species")
                    .assign(reino=lambda d: d["grupo"].map({"Plantas": "Plantae", "Hongos": "Fungi"}).fillna("Animalia")))
 

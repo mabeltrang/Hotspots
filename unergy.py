@@ -21,6 +21,12 @@ import h3
 import pandas as pd
 
 OBLIGATORIAS = ["proyecto", "departamento", "nombre_cientifico"]
+# Nombres alternativos de columnas que se aceptan (ya normalizados: minúsculas, sin tildes)
+ALIAS = {
+    "coordenada_x": "longitud", "x": "longitud", "lon": "longitud", "long": "longitud",
+    "coordenada_y": "latitud", "y": "latitud", "lat": "latitud",
+    "especie": "nombre_cientifico", "nombre_cientifico_": "nombre_cientifico",
+}
 RESOLUCIONES_H3 = [5, 6, 7]
 
 
@@ -62,6 +68,12 @@ def cargar_unergy(carpeta):
             avisos.append(f"{arch.name}: no se pudo leer ({e}).")
             continue
         t.columns = [normalizar_texto(c).replace(" ", "_") for c in t.columns]
+        t = t.rename(columns={c: ALIAS[c] for c in t.columns if c in ALIAS and ALIAS[c] not in t.columns})
+        # Si "latitud/longitud" en realidad son coordenadas planas (valores grandes), pasarlas a este/norte
+        if {"latitud", "longitud"} <= set(t.columns) and "este" not in t.columns:
+            lon_num = pd.to_numeric(t["longitud"], errors="coerce")
+            if lon_num.abs().median() > 180:
+                t = t.rename(columns={"longitud": "este", "latitud": "norte"})
         faltan = [c for c in OBLIGATORIAS if c not in t.columns]
         tiene_geo = {"latitud", "longitud"} <= set(t.columns)
         tiene_planas = {"este", "norte"} <= set(t.columns)
