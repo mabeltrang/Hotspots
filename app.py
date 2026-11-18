@@ -6,16 +6,21 @@ Datos:   data/procesados/<departamento>/registros.parquet  (pipeline/01_procesar
          data/unergy/*.xlsx                                 (inventarios Unergy, opcional)
          data/limites/municipios_colombia.geojson           (DANE, MGN 2018)
 """
+import io
 import json
+import zipfile
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 import numpy as np
 import pandas as pd
 import h3
 import pydeck as pdk
+import pyproj
 import shapely
 import streamlit as st
-from shapely.geometry import shape
+from shapely.geometry import Polygon, mapping, shape
+from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
 from unergy import cargar_unergy, normalizar_texto
@@ -344,6 +349,96 @@ def leyenda(pct, umbral):
                "Las zonas sin color no tienen registros: es falta de muestreo, no ausencia de especies.")
 
 
+# ================================================================ exportar hotspots
+def poligono_celda(celda):
+    return Polygon([(lng, lat) for lat, lng in h3.cell_to_boundary(celda)])
+
+
+def hotspots_a_poligonos(tabla, datos, depto, unidad, res, unidos=True):
+    """Hotspots como polígonos (unidos si son vecinos) con especies, registros, área y municipios."""
+    hot = tabla[tabla["nivel"] == "Hotspot"]
+    if hot.empty:
+        return []
+    if unidad == "Hexágonos":
+        unidades = {c: poligono_celda(c) for c in hot["h3"]}
+        col, mpio_de = f"h3_{res}", dict(zip(hot["h3"], hot["municipio"]))
+    else:
+        nombres, geoms, _ = cargar_municipios(depto)
+        mp = dict(zip(nombres, geoms))
+        unidades = {m: mp[m] for m in hot["municipio"] if m in mp}
+        col, mpio_de = "municipio", {m: m for m in unidades}
+    if unidos:
+        union = unary_union([g.buffer(1e-6) for g in unidades.values()]).buffer(-1e-6)
+        partes = list(union.geoms) if union.geom_type == "MultiPolygon" else [union]
+        partes = [(p, [k for k, g in unidades.items() if p.buffer(1e-6).contains(g.representative_point())])
+                  for p in partes]
+    else:
+        partes = [(g, [k]) for k, g in unidades.items()]
+    a_metros = pyproj.Transformer.from_crs(4326, 9377, always_xy=True).transform
+
+    def area_km2(geom):
+        m = shapely.transform(geom, lambda c: np.column_stack(a_metros(c[:, 0], c[:, 1])))
+        return round(m.area / 1e6, 2)
+
+    salida = []
+    for geom, claves in partes:
+        sub = datos[datos[col].isin(claves)]
+        salida.append({
+            "geom": orient(geom, 1.0) if geom.geom_type == "Polygon" else geom,
+            "unidades": len(claves),
+            "especies": int(sub["species"].nunique()),
+            "registros": int(len(sub)),
+            "area_km2": area_km2(geom),
+            "municipios": ", ".join(sorted({str(mpio_de[k]) for k in claves if mpio_de.get(k)})),
+        })
+    salida.sort(key=lambda d: (-d["especies"], -d["area_km2"]))
+    for i, d in enumerate(salida, 1):
+        d["nombre"] = f"Hotspot {i}"
+    return salida
+
+
+def _anillo_kml(coords):
+    return " ".join(f"{x:.6f},{y:.6f},0" for x, y in coords)
+
+
+def _poligono_kml(p):
+    interiores = "".join(f"<innerBoundaryIs><LinearRing><coordinates>{_anillo_kml(r.coords)}</coordinates>"
+                         "</LinearRing></innerBoundaryIs>" for r in p.interiors)
+    return (f"<Polygon><outerBoundaryIs><LinearRing><coordinates>{_anillo_kml(p.exterior.coords)}"
+            f"</coordinates></LinearRing></outerBoundaryIs>{interiores}</Polygon>")
+
+
+def a_kmz(polis, titulo, descripcion):
+    """KMZ (KML comprimido) para Google Earth, QGIS, ArcGIS."""
+    marcas = []
+    for d in polis:
+        g = d["geom"]
+        partes = list(g.geoms) if g.geom_type == "MultiPolygon" else [g]
+        geometria = "".join(_poligono_kml(p) for p in partes)
+        if len(partes) > 1:
+            geometria = f"<MultiGeometry>{geometria}</MultiGeometry>"
+        info = (f"<b>{escape(d['nombre'])}</b><br/>Especies: {d['especies']}<br/>Registros: {d['registros']}"
+                f"<br/>Área: {d['area_km2']} km²<br/>Municipios: {escape(d['municipios'])}")
+        marcas.append(f"<Placemark><name>{escape(d['nombre'])}</name><description><![CDATA[{info}]]></description>"
+                      f"<styleUrl>#hotspot</styleUrl>{geometria}</Placemark>")
+    kml = ('<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
+           f"<name>{escape(titulo)}</name><description>{escape(descripcion)}</description>"
+           '<Style id="hotspot"><LineStyle><color>ff4e1b2d</color><width>2.5</width></LineStyle>'
+           '<PolyStyle><color>992730d7</color></PolyStyle></Style>' + "".join(marcas) + "</Document></kml>")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("doc.kml", kml)
+    return buf.getvalue()
+
+
+def a_geojson(polis, descripcion):
+    feats = [{"type": "Feature", "geometry": mapping(d["geom"]),
+              "properties": {k: d[k] for k in ("nombre", "unidades", "especies", "registros", "area_km2", "municipios")}}
+             for d in polis]
+    return json.dumps({"type": "FeatureCollection", "name": "hotspots", "description": descripcion,
+                       "features": feats}, ensure_ascii=False).encode("utf-8")
+
+
 # ================================================================ barra lateral
 deptos = departamentos()
 if not deptos:
@@ -497,6 +592,33 @@ with tab_mapa:
     dibujar_mapa(capas, depto, nombres_mpio, capas_proyectos())
     leyenda(pct_hot, umbral)
 
+    st.markdown("#### Descargar hotspots")
+    if hot.empty:
+        st.caption("No hay hotspots con los filtros actuales.")
+    else:
+        forma = st.radio("Forma", ["Polígonos unidos", "Unidades separadas"], horizontal=True,
+                         key="forma_descarga",
+                         help="Unidos: los hexágonos (o municipios) hotspot vecinos se funden en un solo "
+                              "polígono. Separados: una geometría por hexágono o municipio.")
+        polis = hotspots_a_poligonos(tabla, df, depto, unidad, res, unidos=forma == "Polígonos unidos")
+        desc = (f"Hotspots de biodiversidad en {depto.title()} (Unergy). Unidad: {unidad.lower()}"
+                f"{'' if unidad == 'Municipios' else f', {TAMANO_CELDA[res]}'}; top {int(pct_hot*100)} % de riqueza. "
+                f"Grupos: {', '.join(grupos_sel)}. Fuente: {', '.join(fuentes_sel)}. Origen: {', '.join(origen_sel)}. "
+                f"Amenaza: {', '.join(cats_sel) if cats_sel else 'todas'}.")
+        base = f"hotspots_{depto}_{'hex' if unidad == 'Hexágonos' else 'municipios'}"
+        st.caption(f"{len(polis)} polígono(s), {sum(p['area_km2'] for p in polis):,.1f} km² en total. "
+                   "El KMZ abre en Google Earth; el GeoJSON, en QGIS o ArcGIS (desde ahí se exporta a shapefile).")
+        c1, c2 = st.columns(2)
+        c1.download_button("⬇ Descargar KMZ", a_kmz(polis, f"Hotspots {depto.title()}", desc),
+                           file_name=f"{base}.kmz", mime="application/vnd.google-earth.kmz",
+                           width="stretch")
+        c2.download_button("⬇ Descargar GeoJSON", a_geojson(polis, desc),
+                           file_name=f"{base}.geojson", mime="application/geo+json", width="stretch")
+        st.dataframe(pd.DataFrame([{k: d[k] for k in ("nombre", "especies", "registros", "unidades", "area_km2", "municipios")}
+                                   for d in polis]).rename(columns={"nombre": "Hotspot", "especies": "Especies",
+                                   "registros": "Registros", "unidades": "Unidades", "area_km2": "Área (km²)",
+                                   "municipios": "Municipios"}), hide_index=True, width="stretch")
+
 with tab_tiempo:
     st.write("Compara cómo cambia el mapa según el periodo de los registros.")
     anios = df["year"].dropna()
@@ -569,6 +691,10 @@ data/listas/correcciones_origen.csv.
 
 **Amenaza.** Categoría UICN según GBIF y categoría nacional según la Res. 0126 de 2024
 (lista oficial publicada en el SiB Colombia, https://doi.org/10.15472/frowz3). Al elegir CR, EN o VU en el filtro de amenaza, el mapa cuenta solo las especies en esas categorías según la UICN, la lista nacional o ambas.
+
+**Descarga.** Los hotspots se pueden bajar como KMZ (Google Earth) o GeoJSON (QGIS, ArcGIS),
+unidos en polígonos o como unidades separadas. El área se calcula en MAGNA-SIRGAS Colombia
+Origen Nacional (EPSG:9377).
 
 **Limitación.** La riqueza registrada depende de cuánto se ha muestreado: zonas con estudios
 ambientales o mucha observación de aves se ven más ricas. Por eso las unidades con pocos
