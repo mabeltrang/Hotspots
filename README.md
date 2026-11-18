@@ -21,6 +21,13 @@ En Streamlit Cloud: Main file path = `app.py`.
 2. Guardar el Excel en `data/unergy/` (pueden ser varios archivos).
 3. Subir el cambio a GitHub. La app los lee sola, no hay que correr ningún script.
 
+## Origen de las especies (endémica / nativa / introducida)
+
+1. Desde la carpeta del repo: `pip install requests` y `python pipeline/02_origen_especies.py`
+   (consulta la API de GBIF, no necesita cuenta; tarda unos minutos).
+2. Subir a GitHub `data/listas/origen_cesar.csv`.
+3. Correcciones manuales en `data/listas/correcciones_origen.csv` (species, origen).
+
 ## Actualizar GBIF o agregar otro departamento
 
 1. Descargar de GBIF (formato Simple) y guardar el CSV o zip en `data/crudos/`

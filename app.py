@@ -1,4 +1,3 @@
-
 """
 Hotspots de biodiversidad por departamento.
 
@@ -27,6 +26,8 @@ RAIZ = Path(__file__).parent
 CARPETA_DATOS = RAIZ / "data" / "procesados"
 CARPETA_UNERGY = RAIZ / "data" / "unergy"
 ARCHIVO_LIMITES = RAIZ / "data" / "limites" / "municipios_colombia.geojson"
+CARPETA_LISTAS = RAIZ / "data" / "listas"
+ORIGENES = ["Endémica", "Nativa", "Introducida", "Sin dato"]
 
 TAMANO_CELDA = {5: "≈253 km²", 6: "≈36 km²", 7: "≈5 km²", 8: "≈0,7 km²"}
 GRUPOS = {
@@ -173,6 +174,16 @@ def preparar(depto, firma, incluir_unergy):
     if unergy is not None and incluir_unergy:
         df = pd.concat([df, unergy], ignore_index=True)
     df = df.assign(grupo=df["grupo"].map(GRUPOS)).dropna(subset=["grupo"])
+    df["origen"] = "Sin dato"
+    arch_origen = CARPETA_LISTAS / f"origen_{depto}.csv"
+    if arch_origen.exists():
+        o = pd.read_csv(arch_origen)[["species", "origen"]]
+        corr = CARPETA_LISTAS / "correcciones_origen.csv"
+        if corr.exists():
+            c = pd.read_csv(corr)[["species", "origen"]]
+            o = pd.concat([o[~o["species"].isin(c["species"])], c], ignore_index=True)
+        df = df.drop(columns="origen").merge(o.drop_duplicates("species"), on="species", how="left")
+        df["origen"] = df["origen"].fillna("Sin dato")
     nombres, geoms, _ = cargar_municipios(depto)
     if "h3_8" not in df.columns:
         df["h3_8"] = [h3.latlng_to_cell(la, lo, 8) for la, lo in zip(df["lat"], df["lon"])]
@@ -313,6 +324,9 @@ with st.sidebar:
         res = st.select_slider("Tamaño de hexágono", options=[5, 6, 7, 8], value=7,
                                format_func=lambda r: TAMANO_CELDA[r])
     grupos_sel = st.multiselect("Grupos", ORDEN_GRUPOS, default=ORDEN_GRUPOS)
+    origen_sel = st.multiselect("Origen", ORIGENES, default=ORIGENES,
+                                help="Según las listas de distribución de GBIF para Colombia "
+                                     "(pipeline/02_origen_especies.py).")
     pct_hot = st.slider("Hotspots: % de unidades con más especies", 5, 25, 10, step=5) / 100
     resaltar = st.checkbox("Resaltar hotspots", value=True)
     nombres_mpio = st.checkbox("Nombres de municipios", value=True)
@@ -344,9 +358,11 @@ with st.sidebar:
             for a in avisos:
                 st.write("- " + a)
 
-df = df[df["grupo"].isin(grupos_sel)]
+if not (CARPETA_LISTAS / f"origen_{depto}.csv").exists():
+    st.sidebar.caption("Origen: aún sin datos. Corre pipeline/02_origen_especies.py.")
+df = df[df["grupo"].isin(grupos_sel) & df["origen"].isin(origen_sel)]
 if df.empty:
-    st.warning("Selecciona al menos un grupo.")
+    st.warning("Ningún registro cumple los filtros de grupo y origen.")
     st.stop()
 
 proyectos = None
@@ -453,11 +469,12 @@ with tab_detalle:
     sel = df if mpio_sel == "Todos" else df[df["municipio"] == mpio_sel]
     if celda != "Todo el municipio":
         sel = sel[sel[f"h3_{res}"] == celda]
-    sp = (sel.groupby(["grupo", "family", "species"], dropna=False)["year"].max()
+    sp = (sel.groupby(["grupo", "family", "species", "origen"], dropna=False)["year"].max()
              .rename("último registro").reset_index().sort_values(["grupo", "family", "species"]))
     sp["iNaturalist"] = "https://www.inaturalist.org/taxa/search?q=" + sp["species"].str.replace(" ", "+")
     st.caption(f"{len(sp):,} especies")
-    st.dataframe(sp.rename(columns={"grupo": "Grupo", "family": "Familia", "species": "Especie"}),
+    st.dataframe(sp.rename(columns={"grupo": "Grupo", "family": "Familia", "species": "Especie",
+                                    "origen": "Origen"}),
                  hide_index=True, width="stretch",
                  column_config={"iNaturalist": st.column_config.LinkColumn(display_text="ver")})
 
@@ -469,6 +486,11 @@ unidades con más especies, entre las que tienen al menos {umbral} registros.
 
 **Grupos.** Aves, mamíferos, herpetos (reptiles y anfibios), invertebrados (insectos,
 arácnidos y otros) y flora.
+
+**Origen.** Endémica, nativa o introducida según las listas de distribución para Colombia
+que reúne GBIF (por ejemplo GRIIS Colombia y el Catálogo de Plantas y Líquenes de Colombia).
+Las especies sin información quedan como "Sin dato"; se pueden corregir a mano en
+data/listas/correcciones_origen.csv.
 
 **Limitación.** La riqueza registrada depende de cuánto se ha muestreado: zonas con estudios
 ambientales o mucha observación de aves se ven más ricas. Por eso las unidades con pocos

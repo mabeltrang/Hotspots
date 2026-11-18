@@ -7,3 +7,4 @@ h3>=4.0
 openpyxl
 pyproj
 shapely>=2.0
+requests
