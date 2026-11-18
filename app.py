@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import h3
 import pydeck as pdk
 import shapely
 import streamlit as st
@@ -26,7 +27,7 @@ CARPETA_DATOS = RAIZ / "data" / "procesados"
 CARPETA_UNERGY = RAIZ / "data" / "unergy"
 ARCHIVO_LIMITES = RAIZ / "data" / "limites" / "municipios_colombia.geojson"
 
-TAMANO_CELDA = {5: "≈253 km²", 6: "≈36 km²", 7: "≈5 km²"}
+TAMANO_CELDA = {5: "≈253 km²", 6: "≈36 km²", 7: "≈5 km²", 8: "≈0,7 km²"}
 GRUPOS = {
     "Aves": "Aves", "Mamíferos": "Mamíferos",
     "Reptiles": "Herpetos", "Anfibios": "Herpetos", "Herpetos": "Herpetos",
@@ -36,9 +37,20 @@ GRUPOS = {
 }
 ORDEN_GRUPOS = ["Aves", "Mamíferos", "Herpetos", "Invertebrados", "Flora"]
 
-# Degradado amarillo -> rojo (ColorBrewer YlOrRd)
-PALETA = np.array([[255, 255, 204], [255, 237, 160], [254, 217, 118], [254, 178, 76],
-                   [253, 141, 60], [240, 59, 32], [189, 0, 38]])
+# ---- Colores (editar aquí) -----------------------------------------------
+# Degradado de menos a más especies. Pon los códigos hex que quieras, de claro a oscuro.
+PALETA_HEX = ["#FFFFCC", "#FFEDA0", "#FED976", "#FEB24C", "#FD8D3C", "#F03B20", "#BD0026"]
+COLOR_HOTSPOT_HEX = "#5A001E"   # borde de los hotspots
+# --------------------------------------------------------------------------
+
+
+def hex_a_rgb(h):
+    h = h.lstrip("#")
+    return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+
+
+PALETA = np.array([hex_a_rgb(h) for h in PALETA_HEX])
+COLOR_HOTSPOT = hex_a_rgb(COLOR_HOTSPOT_HEX)
 GRIS = [190, 190, 190, 70]
 ALFA = 185
 
@@ -115,6 +127,8 @@ def preparar(depto, firma, incluir_unergy):
         df = pd.concat([df, unergy], ignore_index=True)
     df = df.assign(grupo=df["grupo"].map(GRUPOS)).dropna(subset=["grupo"])
     nombres, geoms, _ = cargar_municipios(depto)
+    if "h3_8" not in df.columns:
+        df["h3_8"] = [h3.latlng_to_cell(la, lo, 8) for la, lo in zip(df["lat"], df["lon"])]
     df["municipio"] = asignar_municipio(df["lon"].to_numpy(), df["lat"].to_numpy(), nombres, geoms)
     return df, meta, unergy, avisos
 
@@ -205,7 +219,7 @@ def capas_hex(celdas, resaltar):
     hot = celdas[celdas["nivel"] == "Hotspot"]
     if resaltar and len(hot):
         capas.append(pdk.Layer("H3HexagonLayer", data=hot, get_hexagon="h3", filled=False,
-                               stroked=True, get_line_color=[90, 0, 30], line_width_min_pixels=2.5,
+                               stroked=True, get_line_color=COLOR_HOTSPOT, line_width_min_pixels=2.5,
                                extruded=False, pickable=False))
     return capas
 
@@ -216,7 +230,7 @@ def capas_mpio(poligonos, resaltar):
     hot = poligonos[poligonos["nivel"] == "Hotspot"]
     if resaltar and len(hot):
         capas.append(pdk.Layer("PolygonLayer", data=hot, get_polygon="poligono", filled=False,
-                               stroked=True, get_line_color=[90, 0, 30], line_width_min_pixels=3))
+                               stroked=True, get_line_color=COLOR_HOTSPOT, line_width_min_pixels=3))
     return capas
 
 
@@ -227,7 +241,7 @@ def leyenda(pct, umbral):
         <span>Menos especies</span>
         <div style="width:220px;height:12px;border-radius:2px;background:linear-gradient(90deg,{stops})"></div>
         <span>Más especies</span>
-        <span style="margin-left:16px;display:inline-block;width:14px;height:14px;border:2.5px solid rgb(90,0,30)"></span>
+        <span style="margin-left:16px;display:inline-block;width:14px;height:14px;border:2.5px solid {COLOR_HOTSPOT_HEX}"></span>
         <span>Hotspot ({int(pct*100)} % con más especies)</span>
         <span style="margin-left:16px;display:inline-block;width:14px;height:14px;background:rgba(190,190,190,.5)"></span>
         <span>Pocos datos (menos de {umbral} registros)</span></div>""",
@@ -249,8 +263,11 @@ with st.sidebar:
     unidad = st.radio("Unidad de análisis", ["Hexágonos", "Municipios"], horizontal=True)
     res = 6
     if unidad == "Hexágonos":
-        res = st.select_slider("Tamaño de hexágono", options=[5, 6, 7], value=6,
+        res = st.select_slider("Tamaño de hexágono", options=[5, 6, 7, 8], value=6,
                                format_func=lambda r: TAMANO_CELDA[r])
+        if res >= 7:
+            st.caption("Con hexágonos pequeños muchas celdas quedan con pocos datos. "
+                       "Puedes bajar el mínimo de registros en Opciones avanzadas.")
     grupos_sel = st.multiselect("Grupos", ORDEN_GRUPOS, default=ORDEN_GRUPOS)
     pct_hot = st.slider("Hotspots: % de unidades con más especies", 5, 25, 10, step=5) / 100
     resaltar = st.checkbox("Resaltar hotspots", value=True)
