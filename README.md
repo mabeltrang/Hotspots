@@ -33,3 +33,5 @@ En Streamlit Cloud: Main file path = `app.py`.
 
 Cerca del 43 % de los registros GBIF de Cesar son CC BY-NC (uso no comercial).
 Para análisis interno no hay problema; para productos comerciales, filtrar por licencia.
+
+Límites municipales: DANE, Marco Geoestadístico Nacional 2018 (`data/limites/`).
