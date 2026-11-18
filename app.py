@@ -39,6 +39,10 @@ GRUPOS = {
     "Plantas": "Flora", "Flora": "Flora",
 }
 ORDEN_GRUPOS = ["Aves", "Mamíferos", "Herpetos", "Invertebrados", "Flora"]
+ICONOS_GRUPO = {"Aves": "🐦", "Mamíferos": "🦊", "Herpetos": "🦎", "Invertebrados": "🦋", "Flora": "🌿"}
+ICONOS_ORIGEN = {"Endémica": "⭐", "Nativa": "🌱", "Introducida": "🚩", "Sin dato": "❔"}
+CATEGORIAS = {"CR": "🔴 CR · En peligro crítico", "EN": "🟠 EN · En peligro", "VU": "🟡 VU · Vulnerable"}
+FUENTES = {"GBIF": "🌐 GBIF", "Unergy": "🌳 Unergy"}
 
 # ---- Colores (editar aquí) -----------------------------------------------
 # Degradado de menos a más especies. Pon los códigos hex que quieras, de claro a oscuro.
@@ -95,6 +99,13 @@ st.markdown(f"""
   [data-testid="stSidebar"] [data-baseweb="tag"] * {{ color: #FFFFFF !important; }}
   [data-testid="stSidebar"] [data-testid="stExpander"] {{ background: rgba(255,255,255,0.06) !important; }}
   [data-testid="stSidebar"] [data-testid="stExpander"] summary {{ background: transparent !important; }}
+  [data-testid="stSidebar"] button[data-testid="stBaseButton-pills"] {{ background: transparent !important;
+    border: 1.5px solid rgba(255,255,255,0.35) !important; }}
+  [data-testid="stSidebar"] button[data-testid="stBaseButton-pills"] * {{ color: #E6DDF8 !important; }}
+  [data-testid="stSidebar"] button[data-testid="stBaseButton-pills"]:hover {{ border-color: {PURPLE_MID} !important; }}
+  [data-testid="stSidebar"] button[data-testid="stBaseButton-pillsActive"] {{ background: {PURPLE} !important;
+    border: 1.5px solid {PURPLE_MID} !important; }}
+  [data-testid="stSidebar"] button[data-testid="stBaseButton-pillsActive"] * {{ color: #FFFFFF !important; font-weight: 700; }}
   [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.2) !important; }}
   [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {{ background: rgba(255,255,255,0.08) !important; }}
 </style>
@@ -171,7 +182,7 @@ def firma_listas():
 
 
 @st.cache_data
-def preparar(depto, firma, incluir_unergy, firma_l):
+def preparar(depto, firma, firma_l):
     """firma y firma_l cambian cuando cambian los Excel o las listas, para recalcular."""
     df, meta = cargar_gbif(depto)
     unergy_todo, avisos = cargar_inventarios(firma)
@@ -179,8 +190,9 @@ def preparar(depto, firma, incluir_unergy, firma_l):
     if unergy_todo is not None:
         unergy = unergy_todo[unergy_todo["departamento"] == normalizar_texto(depto)]
         unergy = unergy.drop(columns="departamento") if len(unergy) else None
-    if unergy is not None and incluir_unergy:
-        df = pd.concat([df, unergy], ignore_index=True)
+    df = df.assign(fuente="GBIF")
+    if unergy is not None:
+        df = pd.concat([df, unergy.assign(fuente="Unergy")], ignore_index=True)
     df = df.assign(grupo=df["grupo"].map(GRUPOS)).dropna(subset=["grupo"])
     df["origen"] = "Sin dato"
     arch_origen = CARPETA_LISTAS / f"origen_{depto}.csv"
@@ -345,20 +357,40 @@ with st.sidebar:
     if unidad == "Hexágonos":
         res = st.select_slider("Tamaño de hexágono", options=[5, 6, 7, 8], value=7,
                                format_func=lambda r: TAMANO_CELDA[r])
-    grupos_sel = st.multiselect("Grupos", ORDEN_GRUPOS, default=ORDEN_GRUPOS)
-    origen_sel = st.multiselect("Origen", ORIGENES, default=ORIGENES,
-                                help="Según las listas de distribución de GBIF para Colombia "
-                                     "(pipeline/02_origen_especies.py).")
-    solo_amenazadas = st.radio("Especies a contar", ["Todas", "Solo amenazadas"], horizontal=True,
-                               help="Amenazadas = CR, EN o VU según la UICN o la lista nacional (MADS).") == "Solo amenazadas"
+    st.markdown("**Grupos**")
+    grupos_sel = st.pills("Grupos", ORDEN_GRUPOS, selection_mode="multi", default=ORDEN_GRUPOS,
+                          format_func=lambda g: f"{ICONOS_GRUPO[g]} {g}", label_visibility="collapsed",
+                          key="pills_grupos") or []
+    st.markdown("**Fuente de los datos**")
+    firma = firma_unergy()
+    fuentes_disp = ["GBIF"] + (["Unergy"] if firma else [])
+    fuentes_sel = st.pills("Fuente", fuentes_disp, selection_mode="multi", default=fuentes_disp,
+                           format_func=lambda f: FUENTES[f], label_visibility="collapsed",
+                           key="pills_fuente") or []
+    st.markdown("**Origen**")
+    origen_sel = st.pills("Origen", ORIGENES, selection_mode="multi", default=ORIGENES,
+                          format_func=lambda o: f"{ICONOS_ORIGEN[o]} {o}", label_visibility="collapsed",
+                          key="pills_origen",
+                          help="Según las listas de distribución de GBIF para Colombia "
+                               "(pipeline/02_origen_especies.py). Deja solo «Endémica» para mapear endemismos.") or []
+    st.markdown("**Estado de amenaza**")
+    cats_sel = st.pills("Amenaza", list(CATEGORIAS), selection_mode="multi", default=[],
+                        format_func=lambda c: CATEGORIAS[c], label_visibility="collapsed",
+                        key="pills_amenaza",
+                        help="Sin selección cuenta todas las especies. Al elegir una o varias categorías, "
+                             "el mapa cuenta solo esas especies (UICN o lista nacional MADS).") or []
+    if cats_sel:
+        fuentes_am = st.pills("Según", ["UICN", "MADS"], selection_mode="multi", default=["UICN", "MADS"],
+                              key="pills_fuente_amenaza",
+                              help="UICN: Lista Roja global. MADS: Resolución 0126 de 2024.") or []
+    else:
+        fuentes_am = ["UICN", "MADS"]
     pct_hot = st.slider("Hotspots: % de unidades con más especies", 5, 25, 10, step=5) / 100
     resaltar = st.checkbox("Resaltar hotspots", value=True)
     nombres_mpio = st.checkbox("Nombres de municipios", value=True)
 
     st.divider()
     st.subheader("Datos Unergy")
-    firma = firma_unergy()
-    incluir_unergy = st.checkbox("Incluir inventarios Unergy", value=True)
 
     with st.expander("Opciones avanzadas"):
         umbral_def = {5: 50, 6: 20, 7: 10, 8: 5}[res] if unidad == "Hexágonos" else 20
@@ -368,7 +400,7 @@ with st.sidebar:
                                       "comparar; la unidad se muestra en gris.")
         archivo_proy = st.file_uploader("Proyectos (CSV con nombre, lat, lon)", type="csv")
 
-df, meta, unergy, avisos = preparar(depto, firma, incluir_unergy, firma_listas())
+df, meta, unergy, avisos = preparar(depto, firma, firma_listas())
 
 with st.sidebar:
     if unergy is None:
@@ -384,16 +416,21 @@ with st.sidebar:
 
 if not (CARPETA_LISTAS / f"origen_{depto}.csv").exists():
     st.sidebar.caption("Origen: aún sin datos. Corre pipeline/02_origen_especies.py.")
-df = df[df["grupo"].isin(grupos_sel) & df["origen"].isin(origen_sel)]
-if solo_amenazadas:
-    df = df[df["amenazada"]]
+df = df[df["grupo"].isin(grupos_sel) & df["origen"].isin(origen_sel) & df["fuente"].isin(fuentes_sel)]
+if cats_sel:
+    en_cat = pd.Series(False, index=df.index)
+    if "UICN" in fuentes_am:
+        en_cat |= df["uicn"].isin(cats_sel)
+    if "MADS" in fuentes_am:
+        en_cat |= df["mads"].isin(cats_sel)
+    df = df[en_cat]
     if not (CARPETA_LISTAS / f"amenaza_{depto}.csv").exists():
         st.sidebar.caption("Amenaza: falta la categoría UICN. Corre pipeline/03_amenaza_especies.py.")
     if not (CARPETA_LISTAS / "amenazadas_mads_0126.csv").exists():
         st.sidebar.caption("MADS: por ahora solo árboles y palmas. Corre pipeline/04_lista_mads_0126.py "
                            "para la lista oficial completa.")
 if df.empty:
-    st.warning("Ningún registro cumple los filtros de grupo y origen.")
+    st.warning("Ningún registro cumple los filtros elegidos. Prueba quitando alguno.")
     st.stop()
 
 proyectos = None
@@ -429,8 +466,8 @@ def construir(datos):
 doi = meta.get("doi_gbif", "")
 st.markdown(f"""<div class="unergy-header"><div class="unergy-logo">🌿</div><div>
 <h1>Hotspots de biodiversidad en {depto.title()}</h1>
-<p>Unergy · Equipo forestal · Riqueza de especies registrada ({', '.join(grupos_sel)}).
-Fuente: <a href="https://doi.org/{doi}" target="_blank">GBIF {doi}</a>{' e inventarios Unergy' if unergy is not None and incluir_unergy else ''}</p>
+<p>Unergy · Equipo forestal · Riqueza de especies registrada ({', '.join(grupos_sel) or 'sin grupos'}).
+Fuente: <a href="https://doi.org/{doi}" target="_blank">GBIF {doi}</a>{' e inventarios Unergy' if 'Unergy' in fuentes_sel else ''}</p>
 </div></div>""", unsafe_allow_html=True)
 
 
@@ -460,6 +497,10 @@ with tab_mapa:
 with tab_tiempo:
     st.write("Compara cómo cambia el mapa según el periodo de los registros.")
     anios = df["year"].dropna()
+    if anios.empty:
+        st.info("Los registros seleccionados no tienen año (por ejemplo, los inventarios Unergy), "
+                "así que no se puede comparar por periodo. Activa también GBIF para ver esta pestaña.")
+        st.stop()
     periodo = st.radio("Periodo", ["Antes de 2000", "2000 a 2014", "2015 en adelante", "Personalizado"],
                        index=2, horizontal=True)
     rangos = {"Antes de 2000": (int(anios.min()), 1999), "2000 a 2014": (2000, 2014),
@@ -524,7 +565,7 @@ Las especies sin información quedan como "Sin dato"; se pueden corregir a mano 
 data/listas/correcciones_origen.csv.
 
 **Amenaza.** Categoría UICN según GBIF y categoría nacional según la Res. 0126 de 2024
-(lista oficial publicada en el SiB Colombia, https://doi.org/10.15472/frowz3). "Solo amenazadas" cuenta las especies CR, EN o VU en cualquiera de las dos.
+(lista oficial publicada en el SiB Colombia, https://doi.org/10.15472/frowz3). Al elegir CR, EN o VU en el filtro de amenaza, el mapa cuenta solo las especies en esas categorías según la UICN, la lista nacional o ambas.
 
 **Limitación.** La riqueza registrada depende de cuánto se ha muestreado: zonas con estudios
 ambientales o mucha observación de aves se ven más ricas. Por eso las unidades con pocos
