@@ -1,0 +1,8 @@
+streamlit>=1.50
+pandas>=2.0
+pyarrow>=14
+pydeck>=0.9
+numpy
+h3>=4.0
+openpyxl
+pyproj

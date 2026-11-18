@@ -1,0 +1,25 @@
+{
+  "departamento": "cesar",
+  "doi_gbif": "10.15468/dl.wafy35",
+  "fecha_procesamiento": "2026-11-18",
+  "filtros": {
+    "incertidumbre_max_m": 2000,
+    "anio_min": null,
+    "solo_especie": true,
+    "sin_duplicados": "especie + punto + año"
+  },
+  "resoluciones_h3": [
+    5,
+    6,
+    7
+  ],
+  "conteos": {
+    "registros_descargados": 472189,
+    "con_coordenadas_validas": 472189,
+    "precision_suficiente": 469769,
+    "descartados_sin_especie": 43072,
+    "registros_finales": 221227
+  },
+  "n_especies": 5068,
+  "cita": "GBIF.org (18 November 2026) GBIF Occurrence Download https://doi.org/10.15468/dl.wafy35"
+}
