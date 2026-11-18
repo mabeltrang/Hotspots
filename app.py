@@ -101,12 +101,12 @@ st.markdown(f"""
   [data-testid="stSidebar"] [data-baseweb="tag"] * {{ color: #FFFFFF !important; }}
   [data-testid="stSidebar"] [data-testid="stExpander"] {{ background: rgba(255,255,255,0.06) !important; }}
   [data-testid="stSidebar"] [data-testid="stExpander"] summary {{ background: transparent !important; }}
-  [data-testid="stSidebar"] button[data-variant="pills"] {{ background: #FFFFFF !important;
-    border: 2px solid #FFFFFF !important; opacity: 1 !important; }}
-  [data-testid="stSidebar"] button[data-variant="pills"] * {{ color: {PURPLE_DARK} !important; font-weight: 500; }}
+  [data-testid="stSidebar"] button[data-variant="pills"] {{ background: {PURPLE_DARK} !important;
+    border: 1.5px solid rgba(255,255,255,0.30) !important; opacity: 1 !important; box-shadow: none !important; }}
+  [data-testid="stSidebar"] button[data-variant="pills"] * {{ color: #E6DDF8 !important; font-weight: 400; }}
   [data-testid="stSidebar"] button[data-variant="pills"]:hover {{ border-color: {PURPLE_MID} !important; }}
   [data-testid="stSidebar"] button[data-variant="pills"][aria-pressed="true"] {{ background: {PURPLE} !important;
-    border: 2px solid {PURPLE_MID} !important; box-shadow: 0 0 0 2px rgba(155,111,232,0.35); }}
+    border: 1.5px solid {PURPLE_MID} !important; }}
   [data-testid="stSidebar"] button[data-variant="pills"][aria-pressed="true"] * {{ color: #FFFFFF !important; font-weight: 700; }}
   [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.2) !important; }}
   [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {{ background: rgba(255,255,255,0.08) !important; }}
