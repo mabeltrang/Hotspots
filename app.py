@@ -1,3 +1,4 @@
+
 """
 Hotspots de biodiversidad por departamento.
 
@@ -41,8 +42,9 @@ ORDEN_GRUPOS = ["Aves", "Mamíferos", "Herpetos", "Invertebrados", "Flora"]
 # Degradado de menos a más especies. Pon los códigos hex que quieras, de claro a oscuro.
 # Colores corporativos Unergy (los mismos de la app de compensación)
 PURPLE, PURPLE_DARK, PURPLE_MID, PURPLE_LIGHT = "#7B4CC9", "#2D1B4E", "#9B6FE8", "#D9CEEF"
-PALETA_HEX = ["#E6DDF7", "#D9CEEF", "#C5B3F0", "#9B6FE8", "#7B4CC9", "#4E2C8C", "#2D1B4E"]
-COLOR_HOTSPOT_HEX = "#F9A825"   # borde de los hotspots (ámbar, contrasta con el morado)
+# Mapa: verde (menos especies) -> amarillo -> rojo (más especies)
+PALETA_HEX = ["#1A9850", "#66BD63", "#A6D96A", "#FEE08B", "#FDAE61", "#F46D43", "#D73027"]
+COLOR_HOTSPOT_HEX = "#2D1B4E"   # borde de los hotspots (morado Unergy)
 # --------------------------------------------------------------------------
 
 
@@ -308,11 +310,8 @@ with st.sidebar:
     unidad = st.radio("Unidad de análisis", ["Hexágonos", "Municipios"], horizontal=True)
     res = 6
     if unidad == "Hexágonos":
-        res = st.select_slider("Tamaño de hexágono", options=[5, 6, 7, 8], value=6,
+        res = st.select_slider("Tamaño de hexágono", options=[5, 6, 7, 8], value=7,
                                format_func=lambda r: TAMANO_CELDA[r])
-        if res >= 7:
-            st.caption("Con hexágonos pequeños muchas celdas quedan con pocos datos. "
-                       "Puedes bajar el mínimo de registros en Opciones avanzadas.")
     grupos_sel = st.multiselect("Grupos", ORDEN_GRUPOS, default=ORDEN_GRUPOS)
     pct_hot = st.slider("Hotspots: % de unidades con más especies", 5, 25, 10, step=5) / 100
     resaltar = st.checkbox("Resaltar hotspots", value=True)
@@ -324,7 +323,9 @@ with st.sidebar:
     incluir_unergy = st.checkbox("Incluir inventarios Unergy", value=True)
 
     with st.expander("Opciones avanzadas"):
-        umbral = st.number_input("Mínimo de registros para evaluar una unidad", 1, 500, 20, 5,
+        umbral_def = {5: 50, 6: 20, 7: 10, 8: 5}[res] if unidad == "Hexágonos" else 20
+        umbral = st.number_input("Mínimo de registros para evaluar una unidad", 1, 500, umbral_def, 1,
+                                 key=f"umbral_{unidad}_{res}",
                                  help="Por debajo de este valor no hay muestreo suficiente para "
                                       "comparar; la unidad se muestra en gris.")
         archivo_proy = st.file_uploader("Proyectos (CSV con nombre, lat, lon)", type="csv")
