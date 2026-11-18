@@ -39,8 +39,10 @@ ORDEN_GRUPOS = ["Aves", "Mamíferos", "Herpetos", "Invertebrados", "Flora"]
 
 # ---- Colores (editar aquí) -----------------------------------------------
 # Degradado de menos a más especies. Pon los códigos hex que quieras, de claro a oscuro.
-PALETA_HEX = ["#FFFFCC", "#FFEDA0", "#FED976", "#FEB24C", "#FD8D3C", "#F03B20", "#BD0026"]
-COLOR_HOTSPOT_HEX = "#5A001E"   # borde de los hotspots
+# Colores corporativos Unergy (los mismos de la app de compensación)
+PURPLE, PURPLE_DARK, PURPLE_MID, PURPLE_LIGHT = "#7B4CC9", "#2D1B4E", "#9B6FE8", "#D9CEEF"
+PALETA_HEX = ["#E6DDF7", "#D9CEEF", "#C5B3F0", "#9B6FE8", "#7B4CC9", "#4E2C8C", "#2D1B4E"]
+COLOR_HOTSPOT_HEX = "#F9A825"   # borde de los hotspots (ámbar, contrasta con el morado)
 # --------------------------------------------------------------------------
 
 
@@ -51,6 +53,49 @@ def hex_a_rgb(h):
 
 PALETA = np.array([hex_a_rgb(h) for h in PALETA_HEX])
 COLOR_HOTSPOT = hex_a_rgb(COLOR_HOTSPOT_HEX)
+
+st.markdown(f"""
+<style>
+  .stApp h1, .stApp h2, .stApp h3 {{ color: #1A1A2E; }}
+  .unergy-header {{ background: {PURPLE_DARK}; padding: 18px 28px 14px; border-radius: 12px;
+    margin-bottom: 18px; display: flex; align-items: center; gap: 16px; }}
+  .unergy-header h1 {{ color: #FFFFFF !important; font-size: 1.55rem; font-weight: 700; margin: 0; padding: 0; }}
+  .unergy-header p {{ color: #C5B3F0 !important; font-size: 0.82rem; margin: 2px 0 0; }}
+  .unergy-header a {{ color: #C5B3F0 !important; }}
+  .unergy-logo {{ font-size: 2.2rem; line-height: 1; }}
+  .stTabs [data-baseweb="tab-list"] {{ gap: 4px; background: {PURPLE_LIGHT}; border-radius: 10px;
+    padding: 4px; border: 1px solid #B8A9E0; }}
+  .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{ display: none !important; }}
+  .stTabs [data-baseweb="tab"] {{ border-radius: 8px !important; color: {PURPLE_DARK} !important;
+    font-weight: 700 !important; padding: 7px 18px !important; background: transparent !important; }}
+  .stTabs [data-baseweb="tab"]:hover {{ background: rgba(123,76,201,0.12) !important; }}
+  .stTabs [aria-selected="true"] {{ background: {PURPLE} !important; }}
+  .stTabs [aria-selected="true"] p {{ color: #FFFFFF !important; }}
+  .metric-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 6px 0 14px; }}
+  .metric-card {{ background: #FFFFFF; border: 2px solid {PURPLE_LIGHT}; border-left: 5px solid {PURPLE};
+    border-radius: 10px; padding: 12px 18px; box-shadow: 0 1px 4px rgba(123,76,201,0.08); }}
+  .metric-card .label {{ font-size: 0.8rem; color: #5A5A72; font-weight: 700; margin-bottom: 4px; }}
+  .metric-card .value {{ font-size: 1.35rem; font-weight: 800; color: {PURPLE_DARK}; }}
+  @media (max-width: 760px) {{ .metric-grid {{ grid-template-columns: 1fr; }} }}
+  [data-testid="stExpander"] {{ border: 1.5px solid #B8A9E0 !important; border-radius: 8px !important; }}
+  [data-testid="stDataFrame"] {{ border: 1.5px solid #B8A9E0; border-radius: 8px; overflow: hidden; }}
+  [data-testid="stSidebar"] {{ background: {PURPLE_DARK} !important; border-right: 3px solid {PURPLE}; }}
+  [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label,
+  [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] small,
+  [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{ color: #FFFFFF !important; }}
+  [data-testid="stSidebar"] h3 {{ color: #C5B3F0 !important; }}
+  [data-testid="stSidebar"] [data-baseweb="select"] *,
+  [data-testid="stSidebar"] [data-baseweb="input"] *,
+  [data-testid="stSidebar"] input {{ color: #1A1A2E !important; }}
+  [data-testid="stSidebar"] [data-baseweb="tag"] {{ background: {PURPLE} !important; }}
+  [data-testid="stSidebar"] [data-baseweb="tag"] * {{ color: #FFFFFF !important; }}
+  [data-testid="stSidebar"] [data-testid="stExpander"] {{ background: rgba(255,255,255,0.06) !important; }}
+  [data-testid="stSidebar"] [data-testid="stExpander"] summary {{ background: transparent !important; }}
+  [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.2) !important; }}
+  [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {{ background: rgba(255,255,255,0.08) !important; }}
+</style>
+""", unsafe_allow_html=True)
+
 GRIS = [190, 190, 190, 70]
 ALFA = 185
 
@@ -189,7 +234,7 @@ def capas_limites(depto, mostrar_nombres):
     capas = [
         pdk.Layer("PathLayer", data=lineas_mpio, get_path="path", get_color=[60, 60, 60, 230],
                   width_min_pixels=1.6, pickable=False),
-        pdk.Layer("PathLayer", data=lineas_depto, get_path="path", get_color=[20, 20, 20, 255],
+        pdk.Layer("PathLayer", data=lineas_depto, get_path="path", get_color=hex_a_rgb(PURPLE_DARK) + [255],
                   width_min_pixels=3, pickable=False),
     ]
     if mostrar_nombres:
@@ -333,10 +378,18 @@ def construir(datos):
 
 
 # ================================================================ página
-st.title(f"Hotspots de biodiversidad en {depto.title()}")
-st.caption(f"Riqueza de especies registrada ({', '.join(grupos_sel)}). "
-           f"Fuente: GBIF, https://doi.org/{meta.get('doi_gbif', '')}"
-           f"{' e inventarios de Unergy' if unergy is not None and incluir_unergy else ''}.")
+doi = meta.get("doi_gbif", "")
+st.markdown(f"""<div class="unergy-header"><div class="unergy-logo">🌿</div><div>
+<h1>Hotspots de biodiversidad en {depto.title()}</h1>
+<p>Unergy · Equipo forestal · Riqueza de especies registrada ({', '.join(grupos_sel)}).
+Fuente: <a href="https://doi.org/{doi}" target="_blank">GBIF {doi}</a>{' e inventarios Unergy' if unergy is not None and incluir_unergy else ''}</p>
+</div></div>""", unsafe_allow_html=True)
+
+
+def tarjetas(items):
+    html = "".join(f'<div class="metric-card"><div class="label">{k}</div><div class="value">{v}</div></div>'
+                   for k, v in items)
+    st.markdown(f'<div class="metric-grid">{html}</div>', unsafe_allow_html=True)
 
 tab_mapa, tab_tiempo, tab_detalle, tab_metodo = st.tabs(
     ["Mapa de hotspots", "Multitemporal", "Municipios y especies", "Método"])
@@ -345,13 +398,14 @@ with tab_mapa:
     tabla, capas = construir(df)
     hot = tabla[tabla["nivel"] == "Hotspot"]
     unidad_txt = "hexágonos" if unidad == "Hexágonos" else "municipios"
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Especies registradas", f"{df['species'].nunique():,}")
-    c2.metric(f"Hotspots ({unidad_txt})", f"{len(hot):,}")
     mpios_hot = hot["municipio"].dropna().value_counts()
-    c3.metric("Municipio con más hotspots" if unidad == "Hexágonos" else "Municipio con más especies",
-              mpios_hot.index[0] if len(mpios_hot) and unidad == "Hexágonos"
-              else tabla.sort_values("especies", ascending=False)["municipio"].iat[0])
+    tarjetas([
+        ("Especies registradas", f"{df['species'].nunique():,}"),
+        (f"Hotspots ({unidad_txt})", f"{len(hot):,}"),
+        ("Municipio con más hotspots" if unidad == "Hexágonos" else "Municipio con más especies",
+         mpios_hot.index[0] if len(mpios_hot) and unidad == "Hexágonos"
+         else tabla.sort_values("especies", ascending=False)["municipio"].iat[0]),
+    ])
     dibujar_mapa(capas, depto, nombres_mpio, capas_proyectos())
     leyenda(pct_hot, umbral)
 
