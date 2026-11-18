@@ -41,7 +41,9 @@ GRUPOS = {
 ORDEN_GRUPOS = ["Aves", "Mamíferos", "Herpetos", "Invertebrados", "Flora"]
 ICONOS_GRUPO = {"Aves": "🐦", "Mamíferos": "🦊", "Herpetos": "🦎", "Invertebrados": "🦋", "Flora": "🌿"}
 ICONOS_ORIGEN = {"Endémica": "⭐", "Nativa": "🌱", "Introducida": "🚩", "Sin dato": "❔"}
-CATEGORIAS = {"CR": "🔴 CR · En peligro crítico", "EN": "🟠 EN · En peligro", "VU": "🟡 VU · Vulnerable"}
+CATEGORIAS = {"CR": "🔴 CR · En peligro crítico", "EN": "🟠 EN · En peligro", "VU": "🟡 VU · Vulnerable",
+              "NT": "🟢 NT · Casi amenazada", "LC": "🔵 LC · Preocupación menor",
+              "DD": "⚪ DD · Datos insuficientes", "NE": "⚫ NE · No evaluada"}
 FUENTES = {"GBIF": "🌐 GBIF", "Unergy": "🌳 Unergy"}
 
 # ---- Colores (editar aquí) -----------------------------------------------
@@ -99,13 +101,13 @@ st.markdown(f"""
   [data-testid="stSidebar"] [data-baseweb="tag"] * {{ color: #FFFFFF !important; }}
   [data-testid="stSidebar"] [data-testid="stExpander"] {{ background: rgba(255,255,255,0.06) !important; }}
   [data-testid="stSidebar"] [data-testid="stExpander"] summary {{ background: transparent !important; }}
-  [data-testid="stSidebar"] button[data-testid="stBaseButton-pills"] {{ background: transparent !important;
-    border: 1.5px solid rgba(255,255,255,0.35) !important; }}
-  [data-testid="stSidebar"] button[data-testid="stBaseButton-pills"] * {{ color: #E6DDF8 !important; }}
-  [data-testid="stSidebar"] button[data-testid="stBaseButton-pills"]:hover {{ border-color: {PURPLE_MID} !important; }}
-  [data-testid="stSidebar"] button[data-testid="stBaseButton-pillsActive"] {{ background: {PURPLE} !important;
-    border: 1.5px solid {PURPLE_MID} !important; }}
-  [data-testid="stSidebar"] button[data-testid="stBaseButton-pillsActive"] * {{ color: #FFFFFF !important; font-weight: 700; }}
+  [data-testid="stSidebar"] button[data-variant="pills"] {{ background: #FFFFFF !important;
+    border: 2px solid #FFFFFF !important; opacity: 1 !important; }}
+  [data-testid="stSidebar"] button[data-variant="pills"] * {{ color: {PURPLE_DARK} !important; font-weight: 500; }}
+  [data-testid="stSidebar"] button[data-variant="pills"]:hover {{ border-color: {PURPLE_MID} !important; }}
+  [data-testid="stSidebar"] button[data-variant="pills"][aria-pressed="true"] {{ background: {PURPLE} !important;
+    border: 2px solid {PURPLE_MID} !important; box-shadow: 0 0 0 2px rgba(155,111,232,0.35); }}
+  [data-testid="stSidebar"] button[data-variant="pills"][aria-pressed="true"] * {{ color: #FFFFFF !important; font-weight: 700; }}
   [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.2) !important; }}
   [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {{ background: rgba(255,255,255,0.08) !important; }}
 </style>
@@ -378,7 +380,8 @@ with st.sidebar:
                         format_func=lambda c: CATEGORIAS[c], label_visibility="collapsed",
                         key="pills_amenaza",
                         help="Sin selección cuenta todas las especies. Al elegir una o varias categorías, "
-                             "el mapa cuenta solo esas especies (UICN o lista nacional MADS).") or []
+                             "el mapa cuenta solo esas especies. NE incluye las que no tienen "
+                             "evaluación UICN.") or []
     if cats_sel:
         fuentes_am = st.pills("Según", ["UICN", "MADS"], selection_mode="multi", default=["UICN", "MADS"],
                               key="pills_fuente_amenaza",
@@ -420,7 +423,7 @@ df = df[df["grupo"].isin(grupos_sel) & df["origen"].isin(origen_sel) & df["fuent
 if cats_sel:
     en_cat = pd.Series(False, index=df.index)
     if "UICN" in fuentes_am:
-        en_cat |= df["uicn"].isin(cats_sel)
+        en_cat |= df["uicn"].fillna("NE").isin(cats_sel)
     if "MADS" in fuentes_am:
         en_cat |= df["mads"].isin(cats_sel)
     df = df[en_cat]
