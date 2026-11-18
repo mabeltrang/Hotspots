@@ -28,6 +28,15 @@ En Streamlit Cloud: Main file path = `app.py`.
 2. Subir a GitHub `data/listas/origen_cesar.csv`.
 3. Correcciones manuales en `data/listas/correcciones_origen.csv` (species, origen).
 
+## Estado de amenaza (UICN y MADS)
+
+- `data/listas/amenazadas_mads_flora.csv`: Res. 0126 de 2024, árboles y palmas (ya incluido).
+- `python pipeline/04_lista_mads_0126.py` descarga la lista oficial completa de la Res. 0126 de 2024
+  (flora y fauna) desde el SiB/GBIF (https://doi.org/10.15472/frowz3) y guarda
+  `data/listas/amenazadas_mads_0126.csv`, que reemplaza a la de árboles y palmas.
+- `python pipeline/03_amenaza_especies.py` (después del 02) trae la categoría UICN y el estado
+  nacional que reportan las listas de GBIF; guarda `data/listas/amenaza_cesar.csv`.
+
 ## Actualizar GBIF o agregar otro departamento
 
 1. Descargar de GBIF (formato Simple) y guardar el CSV o zip en `data/crudos/`

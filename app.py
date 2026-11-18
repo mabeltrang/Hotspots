@@ -28,6 +28,7 @@ CARPETA_UNERGY = RAIZ / "data" / "unergy"
 ARCHIVO_LIMITES = RAIZ / "data" / "limites" / "municipios_colombia.geojson"
 CARPETA_LISTAS = RAIZ / "data" / "listas"
 ORIGENES = ["Endémica", "Nativa", "Introducida", "Sin dato"]
+AMENAZA = {"CR", "EN", "VU"}
 
 TAMANO_CELDA = {5: "≈253 km²", 6: "≈36 km²", 7: "≈5 km²", 8: "≈0,7 km²"}
 GRUPOS = {
@@ -191,6 +192,20 @@ def preparar(depto, firma, incluir_unergy, firma_l):
             o = pd.concat([o[~o["species"].isin(c["species"])], c], ignore_index=True)
         df = df.drop(columns="origen").merge(o.drop_duplicates("species"), on="species", how="left")
         df["origen"] = df["origen"].fillna("Sin dato")
+    # Amenaza: UICN (GBIF) y nacional (lista MADS de flora del repo; si no, lo que reporta GBIF)
+    df["uicn"], df["mads"] = None, None
+    arch_am = CARPETA_LISTAS / f"amenaza_{depto}.csv"
+    if arch_am.exists():
+        am = pd.read_csv(arch_am).drop_duplicates("species")
+        df = df.drop(columns=["uicn", "mads"]).merge(am.rename(columns={"mads_gbif": "mads"}), on="species", how="left")
+    # Lista oficial completa (pipeline/04) si existe; si no, la de árboles y palmas
+    for nombre in ["amenazadas_mads_0126.csv", "amenazadas_mads_flora.csv"]:
+        arch_mads = CARPETA_LISTAS / nombre
+        if arch_mads.exists():
+            mads = pd.read_csv(arch_mads).drop_duplicates("species").set_index("species")["categoria"]
+            df["mads"] = df["species"].map(mads).fillna(df["mads"])
+            break
+    df["amenazada"] = df["uicn"].isin(AMENAZA) | df["mads"].isin(AMENAZA)
     nombres, geoms, _ = cargar_municipios(depto)
     if "h3_8" not in df.columns:
         df["h3_8"] = [h3.latlng_to_cell(la, lo, 8) for la, lo in zip(df["lat"], df["lon"])]
@@ -334,6 +349,8 @@ with st.sidebar:
     origen_sel = st.multiselect("Origen", ORIGENES, default=ORIGENES,
                                 help="Según las listas de distribución de GBIF para Colombia "
                                      "(pipeline/02_origen_especies.py).")
+    solo_amenazadas = st.radio("Especies a contar", ["Todas", "Solo amenazadas"], horizontal=True,
+                               help="Amenazadas = CR, EN o VU según la UICN o la lista nacional (MADS).") == "Solo amenazadas"
     pct_hot = st.slider("Hotspots: % de unidades con más especies", 5, 25, 10, step=5) / 100
     resaltar = st.checkbox("Resaltar hotspots", value=True)
     nombres_mpio = st.checkbox("Nombres de municipios", value=True)
@@ -368,6 +385,13 @@ with st.sidebar:
 if not (CARPETA_LISTAS / f"origen_{depto}.csv").exists():
     st.sidebar.caption("Origen: aún sin datos. Corre pipeline/02_origen_especies.py.")
 df = df[df["grupo"].isin(grupos_sel) & df["origen"].isin(origen_sel)]
+if solo_amenazadas:
+    df = df[df["amenazada"]]
+    if not (CARPETA_LISTAS / f"amenaza_{depto}.csv").exists():
+        st.sidebar.caption("Amenaza: falta la categoría UICN. Corre pipeline/03_amenaza_especies.py.")
+    if not (CARPETA_LISTAS / "amenazadas_mads_0126.csv").exists():
+        st.sidebar.caption("MADS: por ahora solo árboles y palmas. Corre pipeline/04_lista_mads_0126.py "
+                           "para la lista oficial completa.")
 if df.empty:
     st.warning("Ningún registro cumple los filtros de grupo y origen.")
     st.stop()
@@ -476,12 +500,12 @@ with tab_detalle:
     sel = df if mpio_sel == "Todos" else df[df["municipio"] == mpio_sel]
     if celda != "Todo el municipio":
         sel = sel[sel[f"h3_{res}"] == celda]
-    sp = (sel.groupby(["grupo", "family", "species", "origen"], dropna=False)["year"].max()
+    sp = (sel.groupby(["grupo", "family", "species", "origen", "uicn", "mads"], dropna=False)["year"].max()
              .rename("último registro").reset_index().sort_values(["grupo", "family", "species"]))
     sp["iNaturalist"] = "https://www.inaturalist.org/taxa/search?q=" + sp["species"].str.replace(" ", "+")
     st.caption(f"{len(sp):,} especies")
     st.dataframe(sp.rename(columns={"grupo": "Grupo", "family": "Familia", "species": "Especie",
-                                    "origen": "Origen"}),
+                                    "origen": "Origen", "uicn": "UICN", "mads": "MADS"}),
                  hide_index=True, width="stretch",
                  column_config={"iNaturalist": st.column_config.LinkColumn(display_text="ver")})
 
@@ -498,6 +522,9 @@ arácnidos y otros) y flora.
 que reúne GBIF (por ejemplo GRIIS Colombia y el Catálogo de Plantas y Líquenes de Colombia).
 Las especies sin información quedan como "Sin dato"; se pueden corregir a mano en
 data/listas/correcciones_origen.csv.
+
+**Amenaza.** Categoría UICN según GBIF y categoría nacional según la Res. 0126 de 2024
+(lista oficial publicada en el SiB Colombia, https://doi.org/10.15472/frowz3). "Solo amenazadas" cuenta las especies CR, EN o VU en cualquiera de las dos.
 
 **Limitación.** La riqueza registrada depende de cuánto se ha muestreado: zonas con estudios
 ambientales o mucha observación de aves se ven más ricas. Por eso las unidades con pocos
