@@ -52,8 +52,11 @@ def _planas_a_geograficas(este, norte):
     return lat, lon
 
 
-def cargar_unergy(carpeta):
-    """Lee todos los Excel de la carpeta. Devuelve (registros, avisos)."""
+def cargar_unergy(carpeta, fuente="Unergy"):
+    """Lee todos los Excel de la carpeta. Devuelve (registros, avisos).
+
+    fuente: etiqueta de los registros ("Unergy" para data/unergy, "CAR" para data/car).
+    """
     carpeta = Path(carpeta)
     archivos = sorted(p for p in carpeta.glob("*.xlsx") if not p.name.startswith("~$"))
     avisos = []
@@ -131,9 +134,9 @@ def cargar_unergy(carpeta):
         "year": pd.array(df["year"], dtype="Int64"),
         "lat": df["latitud"].astype(float),
         "lon": df["longitud"].astype(float),
-        "fuente": "Unergy",
+        "fuente": fuente,
         "institutionCode": df["proyecto"].astype(str),
-        "basisOfRecord": "INVENTARIO_UNERGY",
+        "basisOfRecord": f"INVENTARIO_{fuente.upper()}",
         "departamento": df["departamento"].map(normalizar_texto),
     })
     for r in RESOLUCIONES_H3:
@@ -141,6 +144,6 @@ def cargar_unergy(carpeta):
 
     # Una presencia por especie, proyecto y celda fina
     salida = salida.drop_duplicates(subset=["species", "institutionCode", "h3_7"])
-    avisos.insert(0, f"{len(archivos)} archivo(s), {n0} filas leídas, "
+    avisos.insert(0, f"{fuente}: {len(archivos)} archivo(s), {n0} filas leídas, "
                      f"{len(salida)} presencias únicas de especie usadas.")
     return salida, avisos
