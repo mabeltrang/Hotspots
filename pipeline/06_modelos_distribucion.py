@@ -28,6 +28,10 @@ Salidas (subir a data/procesados/<depto>/):
 
 Uso (Colab o local):
     python pipeline/06_modelos_distribucion.py --depto cesar --covariables /ruta/covariables_cesar.tif
+
+Prueba de sensibilidad (no guarda archivos, solo imprime el resumen): repetir sin los registros de
+ciertas instituciones para ver si los hotspots modelados dependen de ellas.
+    python pipeline/06_modelos_distribucion.py --covariables ... --excluir "Prodeco,Drummond"
 """
 import argparse
 import json
@@ -64,25 +68,51 @@ C_REGULARIZACION = 0.5  # menor = modelo más suave
 BANDAS_GEE = ["bio01", "bio04", "bio12", "bio15", "bio17", "elevacion", "pendiente", "cobertura_arborea"]
 
 
-def cargar_registros(depto):
+COLUMNAS = ["species", "grupo", "lat", "lon", f"h3_{RES}", "institutionCode"]
+
+
+def cargar_registros(depto, excluir=()):
     df = pd.read_parquet(RAIZ / "data" / "procesados" / depto / "registros.parquet")
-    df = df[["species", "grupo", "lat", "lon", f"h3_{RES}"]]
+    df = df[COLUMNAS]
     for fuente, carpeta in {"Unergy": RAIZ / "data" / "unergy", "CAR": RAIZ / "data" / "car"}.items():
         if carpeta.exists() and any(carpeta.glob("*.xlsx")):
             inv, _ = cargar_unergy(carpeta, fuente)
             if inv is not None:
                 inv = inv[inv["departamento"] == normalizar_texto(depto)]
-                df = pd.concat([df, inv[["species", "grupo", "lat", "lon", f"h3_{RES}"]]], ignore_index=True)
+                df = pd.concat([df, inv[COLUMNAS]], ignore_index=True)
+    if excluir:
+        quitar = df["institutionCode"].fillna("").str.contains("|".join(excluir), case=False)
+        print(f"Excluidos {int(quitar.sum()):,} registros de: {', '.join(excluir)}")
+        df = df[~quitar]
     df["grupo"] = df["grupo"].map(GRUPOS)
     df = aplicar_sinonimos(df, RAIZ / "data" / "listas")
     return df.dropna(subset=["grupo", "species", f"h3_{RES}"])
 
 
-def celdas_departamento(depto):
+def municipios(depto):
     datos = json.loads((RAIZ / "data" / "limites" / "municipios_colombia.geojson").read_text(encoding="utf-8"))
-    contorno = unary_union([shape(f["geometry"]) for f in datos["features"]
-                            if normalizar_texto(f["properties"]["DPTO_CNMBR"]) == normalizar_texto(depto)])
+    return {f["properties"]["MPIO_CNMBR"]: shape(f["geometry"]) for f in datos["features"]
+            if normalizar_texto(f["properties"]["DPTO_CNMBR"]) == normalizar_texto(depto)}
+
+
+def celdas_departamento(depto):
+    contorno = unary_union(list(municipios(depto).values()))
     return set(h3.geo_to_cells(contorno.__geo_interface__, RES))
+
+
+def resumen_hotspots(pred, depto):
+    """Municipios con más hexágonos en el 10 % de mayor riqueza modelada."""
+    import shapely
+    if pred.empty:
+        return
+    riq = pred.groupby(f"h3_{RES}", observed=True)["species"].nunique()
+    top = riq[riq >= riq.quantile(0.9)].index
+    lat, lon = np.array([h3.cell_to_latlng(c) for c in top]).T
+    mun = pd.Series("Fuera del límite", index=top)
+    for n, g in municipios(depto).items():
+        mun[shapely.contains_xy(g, lon, lat)] = n
+    print("\nHotspots modelados (10 % de hexágonos con más especies) por municipio:")
+    print(mun.value_counts().head(8).to_string())
 
 
 def covariables_por_celda(celdas, ruta_tif):
@@ -123,11 +153,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--depto", default="cesar")
     ap.add_argument("--covariables", required=True)
+    ap.add_argument("--excluir", default="", help="instituciones a excluir, separadas por coma (prueba de sensibilidad)")
     args = ap.parse_args()
+    excluir = tuple(x.strip() for x in args.excluir.split(",") if x.strip())
     depto = normalizar_texto(args.depto)
     salida = RAIZ / "data" / "procesados" / depto
 
-    reg = cargar_registros(depto)
+    reg = cargar_registros(depto, excluir)
     celdas = celdas_departamento(depto)
     reg = reg[reg[f"h3_{RES}"].isin(celdas)]
     cov = covariables_por_celda(celdas, args.covariables)
@@ -169,6 +201,11 @@ def main():
     met = pd.DataFrame(metricas)
     pred = pd.concat(filas_pred, ignore_index=True) if filas_pred else pd.DataFrame(
         columns=[f"h3_{RES}", "species", "idoneidad"])
+    print(f"\n{len(met)} especies modeladas, {int(met['valido'].sum()) if len(met) else 0} con AUC espacial >= {AUC_MIN}")
+    resumen_hotspots(pred, depto)
+    if excluir:
+        print("\nPrueba de sensibilidad: no se guardaron archivos.")
+        return
     pred["species"] = pred["species"].astype("category")
     pred.to_parquet(salida / "sdm_idoneidad.parquet", index=False)
     met.to_csv(salida / "sdm_metricas.csv", index=False)
@@ -176,7 +213,6 @@ def main():
         "fecha": date.today().isoformat(), "resolucion_h3": RES, "covariables": list(cov.columns),
         "min_celdas": MIN_CELDAS, "auc_min": AUC_MIN, "especies_modeladas": len(met),
         "especies_validas": int(met["valido"].sum()) if len(met) else 0}, ensure_ascii=False, indent=1))
-    print(f"\n{len(met)} especies modeladas, {int(met['valido'].sum()) if len(met) else 0} con AUC espacial >= {AUC_MIN}")
     print(f"Archivos en {salida.relative_to(RAIZ)}: sdm_idoneidad.parquet, sdm_metricas.csv, sdm_info.json")
 
 
