@@ -67,6 +67,18 @@ Pestaña para subir el polígono de un predio (KMZ, KML, GeoJSON o shapefile en 
 especies registradas en un radio, amenazadas y endémicas, distancia al hotspot más cercano, áreas
 de conservación que toca y un texto de resumen para el informe.
 
+## Modelos de distribución de especies
+
+1. En Google Earth Engine, correr `pipeline/gee_covariables.js` y darle RUN a la tarea: llega
+   `covariables_cesar.tif` a Google Drive (carpeta HOTSPOTS_SDM).
+2. En Colab, correr el script de modelos (clona el repo, lee el GeoTIFF de Drive y ejecuta
+   `pipeline/06_modelos_distribucion.py`).
+3. Subir a `data/procesados/cesar/` los tres archivos que descarga: `sdm_idoneidad.parquet`,
+   `sdm_metricas.csv` y `sdm_info.json`.
+
+La app muestra la pestaña *Distribución modelada* (riqueza modelada y mapa por especie) y, en la
+consulta por predio, las especies con hábitat idóneo que no tienen registros en el área.
+
 ## Actualizar GBIF o agregar otro departamento
 
 1. Descargar de GBIF (formato Simple) y guardar el CSV o zip en `data/crudos/`

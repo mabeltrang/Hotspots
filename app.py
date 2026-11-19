@@ -25,6 +25,7 @@ from shapely.geometry import Polygon, mapping, shape
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
+from comun import GRUPOS, ORDEN_GRUPOS, aplicar_sinonimos
 from geodatos import FORMATOS, a_plano, a_wgs84, leer_vector
 from unergy import cargar_unergy, normalizar_texto
 
@@ -42,14 +43,6 @@ ORIGENES = ["Endémica", "Nativa", "Introducida", "Sin dato"]
 AMENAZA = {"CR", "EN", "VU"}
 
 TAMANO_CELDA = {5: "≈253 km²", 6: "≈36 km²", 7: "≈5 km²", 8: "≈0,7 km²"}
-GRUPOS = {
-    "Aves": "Aves", "Mamíferos": "Mamíferos",
-    "Reptiles": "Herpetos", "Anfibios": "Herpetos", "Herpetos": "Herpetos",
-    "Insectos": "Invertebrados", "Arácnidos": "Invertebrados",
-    "Otros invertebrados": "Invertebrados", "Invertebrados": "Invertebrados",
-    "Plantas": "Flora", "Flora": "Flora",
-}
-ORDEN_GRUPOS = ["Aves", "Mamíferos", "Herpetos", "Invertebrados", "Flora"]
 ICONOS_GRUPO = {"Aves": "🐦", "Mamíferos": "🦊", "Herpetos": "🦎", "Invertebrados": "🦋", "Flora": "🌿"}
 ICONOS_ORIGEN = {"Endémica": "⭐", "Nativa": "🌱", "Introducida": "🚩", "Sin dato": "❔"}
 CATEGORIAS = {"CR": "🔴 CR · En peligro crítico", "EN": "🟠 EN · En peligro", "VU": "🟡 VU · Vulnerable",
@@ -241,6 +234,36 @@ def union_capas(depto, seleccion, firma):
     return None if union.is_empty else union
 
 
+def firma_sdm(depto):
+    carpeta = RAIZ / "data" / "procesados" / depto
+    return tuple((n, (carpeta / n).stat().st_mtime) for n in ("sdm_idoneidad.parquet", "sdm_metricas.csv")
+                 if (carpeta / n).exists())
+
+
+@st.cache_data
+def cargar_sdm(depto, firma):
+    """Idoneidad por hexágono (res 7) y métricas por especie de pipeline/06. (None, None, {}) si no hay."""
+    if len(firma) < 2:
+        return None, None, {}
+    carpeta = RAIZ / "data" / "procesados" / depto
+    info_p = carpeta / "sdm_info.json"
+    info = json.loads(info_p.read_text(encoding="utf-8")) if info_p.exists() else {}
+    pred = pd.read_parquet(carpeta / "sdm_idoneidad.parquet")
+    pred["species"] = pred["species"].astype(str)
+    return pred, pd.read_csv(carpeta / "sdm_metricas.csv"), info
+
+
+@st.cache_data
+def municipio_de_celdas(depto, celdas):
+    """Municipio que contiene el centro de cada hexágono."""
+    nombres, geoms, _ = cargar_municipios(depto)
+    lat, lon = np.array([h3.cell_to_latlng(c) for c in celdas]).T if celdas else (np.array([]), np.array([]))
+    salida = np.full(len(celdas), "Fuera del límite", dtype=object)
+    for n, g in zip(nombres, geoms):
+        salida[shapely.contains_xy(g, lon, lat)] = n
+    return dict(zip(celdas, salida))
+
+
 @st.cache_data
 def preparar(depto, firma, firma_l):
     """firma y firma_l cambian cuando cambian los Excel o las listas, para recalcular."""
@@ -253,7 +276,7 @@ def preparar(depto, firma, firma_l):
     df = df.assign(fuente="GBIF")
     if unergy is not None:
         df = pd.concat([df, unergy], ignore_index=True)
-    df = df.assign(grupo=df["grupo"].map(GRUPOS)).dropna(subset=["grupo"])
+    df = aplicar_sinonimos(df.assign(grupo=df["grupo"].map(GRUPOS)).dropna(subset=["grupo"]), CARPETA_LISTAS)
     df["origen"] = "Sin dato"
     arch_origen = CARPETA_LISTAS / f"origen_{depto}.csv"
     if arch_origen.exists():
@@ -342,6 +365,15 @@ def puntaje_por_grupo(df, col, umbral, cob_min, metrica):
     return salida
 
 
+def colores_escala(valores, ok):
+    """Color verde→rojo para valores entre 0 y 1; GRIS donde ok es False."""
+    pos = pd.Series(valores).fillna(0).clip(0, 1).to_numpy() * (len(PALETA) - 1)
+    i = np.clip(pos.astype(int), 0, len(PALETA) - 2)
+    t = (pos - i)[:, None]
+    rgb = (PALETA[i] * (1 - t) + PALETA[i + 1] * t).astype(int)
+    return [[int(v) for v in c] + [ALFA] if s else GRIS for c, s in zip(rgb, ok)]
+
+
 def clasificar(tabla, umbral, pct_hotspot, metrica, cob_min, por_grupo=False):
     """Agrega nivel y color según el percentil de la métrica entre unidades con datos suficientes.
 
@@ -368,11 +400,7 @@ def clasificar(tabla, umbral, pct_hotspot, metrica, cob_min, por_grupo=False):
         return "Alto" if p > 0.66 else ("Medio" if p > 0.33 else "Bajo")
 
     tabla["nivel"] = tabla["percentil"].map(nivel)
-    pos = tabla["percentil"].fillna(0).to_numpy() * (len(PALETA) - 1)
-    i = np.clip(pos.astype(int), 0, len(PALETA) - 2)
-    t = (pos - i)[:, None]
-    rgb = (PALETA[i] * (1 - t) + PALETA[i + 1] * t).astype(int)
-    tabla["color"] = [[int(v) for v in c] + [ALFA] if s else GRIS for c, s in zip(rgb, ok)]
+    tabla["color"] = colores_escala(tabla["percentil"], ok)
     etiqueta = {"Rarefactada": f"Rarefactada a {umbral} registros", "Chao1": "Chao1", "Observada": "Observada"}[metrica]
     # Tooltip: pydeck escapa el HTML de los valores, así que cada línea va en su propia columna
     tabla["l1"] = [f"{int(e)} especies observadas · {nv}" for e, nv in zip(tabla["especies"], tabla["nivel"])]
@@ -751,7 +779,7 @@ def consultar_predio(predio, radio_km, datos, tabla, unidad, depto, capas, umbra
     dx, dy = maxx - minx, maxy - miny
     vista = pdk.ViewState(latitude=(miny + maxy) / 2, longitude=(minx + maxx) / 2,
                           zoom=float(np.clip(math.log2(360 / max(dx, dy, 1e-4)) - 0.6, 6, 15)))
-    return {"registros": sel, "especies": sp, "hotspot_txt": hotspot_txt, "areas": areas, "vista": vista,
+    return {"registros": sel, "especies": sp, "hotspot_txt": hotspot_txt, "areas": areas, "vista": vista, "zona": zona,
             "capas": capas_predio(predio, zona, sel), "resumen": " ".join(partes)}
 
 
@@ -877,15 +905,22 @@ with st.sidebar:
 
 if not (CARPETA_LISTAS / f"origen_{depto}.csv").exists():
     st.sidebar.caption("Origen: aún sin datos. Corre pipeline/02_origen_especies.py.")
+atributos = (df.drop_duplicates("species").set_index("species")[["grupo", "family", "origen", "uicn", "mads", "amenazada"]])
+df_todas_fuentes = df[df["grupo"].isin(grupos_sel) & df["origen"].isin(origen_sel)]
 df = df[df["grupo"].isin(grupos_sel) & df["origen"].isin(origen_sel) & df["fuente"].isin(fuentes_sel)]
 df_consulta = df  # la consulta por predio no aplica el filtro de amenaza
-if cats_sel:
-    en_cat = pd.Series(False, index=df.index)
+def en_categorias(tabla):
+    """True en las filas cuya especie está en las categorías de amenaza elegidas."""
+    en_cat = pd.Series(False, index=tabla.index)
     if "UICN" in fuentes_am:
-        en_cat |= df["uicn"].fillna("NE").isin(cats_sel)
+        en_cat |= tabla["uicn"].fillna("NE").isin(cats_sel)
     if "MADS" in fuentes_am:
-        en_cat |= df["mads"].isin(cats_sel)
-    df = df[en_cat]
+        en_cat |= tabla["mads"].isin(cats_sel)
+    return en_cat
+
+
+if cats_sel:
+    df = df[en_categorias(df)]
     if not (CARPETA_LISTAS / f"amenaza_{depto}.csv").exists():
         st.sidebar.caption("Amenaza: falta la categoría UICN. Corre pipeline/03_amenaza_especies.py.")
     if not (CARPETA_LISTAS / "amenazadas_mads_0126.csv").exists():
@@ -945,8 +980,55 @@ def tarjetas(items):
                    for k, v in items)
     st.markdown(f'<div class="metric-grid">{html}</div>', unsafe_allow_html=True)
 
-tab_mapa, tab_consulta, tab_tiempo, tab_detalle, tab_metodo = st.tabs(
-    ["Mapa de hotspots", "Consulta por predio", "Multitemporal", "Municipios y especies", "Método"])
+tab_mapa, tab_consulta, tab_sdm, tab_tiempo, tab_detalle, tab_metodo = st.tabs(
+    ["Mapa de hotspots", "Consulta por predio", "Distribución modelada", "Multitemporal", "Municipios y especies",
+     "Método"])
+
+pred_sdm, met_sdm, info_sdm = cargar_sdm(depto, firma_sdm(depto))
+
+
+def especies_modeladas(con_amenaza=True):
+    """Métricas de las especies válidas que cumplen los filtros de grupo, origen y (opcional) amenaza."""
+    m = met_sdm[met_sdm["valido"]].drop(columns="grupo").join(atributos, on="species", how="inner")
+    m = m[m["grupo"].isin(grupos_sel) & m["origen"].isin(origen_sel)]
+    if con_amenaza and cats_sel:
+        m = m[en_categorias(m)]
+    return m
+
+
+def modelos_en_zona(zona, especies_registradas):
+    """Especies con hábitat idóneo modelado en la zona; marca si tienen registros en ella."""
+    celdas = set(h3.geo_to_cells(zona.__geo_interface__, 7))
+    c = zona.centroid
+    celdas.add(h3.latlng_to_cell(c.y, c.x, 7))
+    m = especies_modeladas(con_amenaza=False)
+    p = pred_sdm[pred_sdm["h3_7"].isin(celdas) & pred_sdm["species"].isin(m["species"])]
+    if p.empty:
+        return pd.DataFrame()
+    t = (p.groupby("species")["idoneidad"].max().rename("Idoneidad máx.").round(2).reset_index()
+         .merge(m[["species", "grupo", "family", "uicn", "mads", "amenazada", "auc_espacial"]], on="species"))
+    t["Registrada en el área"] = t["species"].isin(especies_registradas)
+    t = t.rename(columns={"species": "Especie", "grupo": "Grupo", "family": "Familia", "uicn": "UICN",
+                          "mads": "MADS", "amenazada": "Amenazada", "auc_espacial": "AUC del modelo"})
+    return t.sort_values(["Registrada en el área", "Amenazada", "Idoneidad máx."], ascending=[True, False, False])
+
+
+def categorias_txt(uicn, mads):
+    """'UICN EN, MADS VU' con las categorías de amenaza que apliquen, o ''."""
+    return ", ".join(f"{n} {c}" for n, c in (("UICN", uicn), ("MADS", mads)) if c in AMENAZA)
+
+
+def leyenda_sdm(texto_bajo, texto_alto, con_hotspot):
+    stops = ", ".join(f"rgb({r},{g},{b})" for r, g, b in PALETA)
+    hot = (f'<span style="margin-left:16px;display:inline-block;width:14px;height:14px;'
+           f'border:2.5px solid {COLOR_HOTSPOT_HEX}"></span><span>Hotspot modelado ({int(pct_hot*100)} %)</span>'
+           if con_hotspot else "")
+    st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;font-size:0.85rem;flex-wrap:wrap">
+        <span>{texto_bajo}</span>
+        <div style="width:220px;height:12px;border-radius:2px;background:linear-gradient(90deg,{stops})"></div>
+        <span>{texto_alto}</span>{hot}
+        <span style="margin-left:16px;display:inline-block;width:14px;height:14px;background:rgba(200,200,200,.45);border:1px solid #999"></span>
+        <span>Sin hábitat idóneo o sin predicción</span></div>""", unsafe_allow_html=True)
 
 with tab_mapa:
     tabla, capas = construir(df)
@@ -1037,9 +1119,17 @@ with tab_consulta:
         dibujar_mapa(capas, depto, False, capas_extra() + consulta["capas"], alto=520, vista=consulta["vista"])
         st.caption("Puntos: 🔴 amenazada · 🟣 endémica · ⚪ otras. Línea negra: predio; azul claro: radio de búsqueda.")
 
+        mod = modelos_en_zona(consulta["zona"], set(sp["Especie"])) if pred_sdm is not None else pd.DataFrame()
+        resumen = consulta["resumen"]
+        if len(mod):
+            nuevas = mod[~mod["Registrada en el área"]]
+            amen_n = nuevas[nuevas["Amenazada"]]
+            resumen += (f" Además, los modelos de distribución estiman hábitat idóneo para {len(nuevas)} especies "
+                        f"sin registros en el área" + (f", de ellas {len(amen_n)} amenazadas: "
+                        + "; ".join(f"{r.Especie} ({categorias_txt(r.UICN, r.MADS)})" for r in amen_n.head(10).itertuples())
+                        if len(amen_n) else "") + "; su presencia debe verificarse en campo.")
         st.markdown("#### Resumen")
-        st.text_area("Texto para el informe o concepto técnico", consulta["resumen"], height=170,
-                     key="resumen_predio")
+        st.text_area("Texto para el informe o concepto técnico", resumen, height=190, key="resumen_predio")
         if not consulta["areas"].empty:
             st.markdown("#### Áreas de conservación cercanas")
             st.dataframe(consulta["areas"], hide_index=True, width="stretch")
@@ -1048,6 +1138,93 @@ with tab_consulta:
                      column_config={"iNaturalist": st.column_config.LinkColumn(display_text="ver")})
         st.download_button("⬇ Descargar lista de especies (CSV)", sp.to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"especies_{Path(archivo_predio.name).stem}.csv", mime="text/csv")
+        if len(mod):
+            st.markdown("#### Especies con hábitat idóneo según los modelos")
+            st.caption("Especies que probablemente están en el área por clima, relieve y cobertura, aunque no tengan "
+                       "registros ahí. Primero las que no tienen registros y, entre ellas, las amenazadas. Son "
+                       "predicciones: sirven para orientar la caracterización en campo.")
+            st.dataframe(mod, hide_index=True, width="stretch")
+
+with tab_sdm:
+    if pred_sdm is None:
+        st.info("Aún no hay modelos de distribución para este departamento. Se generan con "
+                "pipeline/gee_covariables.js (variables ambientales en Google Earth Engine) y "
+                "pipeline/06_modelos_distribucion.py; ver el README.")
+    else:
+        msel = especies_modeladas()
+        st.write("Hábitat idóneo estimado con modelos de distribución de especies: dónde es probable que esté "
+                 "cada especie según el clima, el relieve y la cobertura de bosque actual, aunque nadie la haya "
+                 "registrado ahí.")
+        st.caption(f"{info_sdm.get('especies_validas', len(met_sdm[met_sdm['valido']]))} de "
+                   f"{info_sdm.get('especies_modeladas', len(met_sdm))} especies modeladas pasaron la validación "
+                   f"espacial (AUC ≥ {info_sdm.get('auc_min', 0.7)}); {len(msel)} cumplen los filtros de grupo, origen "
+                   f"y amenaza. Solo se modelan especies con al menos {info_sdm.get('min_celdas', 20)} localidades, "
+                   f"así que pesan más las comunes. Modelos del {info_sdm.get('fecha', 's.f.')}.")
+        vista_sdm = st.radio("Ver", ["Riqueza modelada", "Una especie"], horizontal=True, key="vista_sdm")
+        p = pred_sdm[pred_sdm["species"].isin(msel["species"])]
+        if p.empty:
+            st.info("Ninguna especie modelada cumple los filtros actuales.")
+        elif vista_sdm == "Riqueza modelada":
+            t = p.groupby("h3_7")["species"].nunique().rename("n").reset_index().rename(columns={"h3_7": "h3"})
+            t["percentil"] = t["n"].rank(pct=True, method="max")
+            t["nivel"] = np.where(t["percentil"] > 1 - pct_hot, "Hotspot", "")
+            t["color"] = colores_escala(t["percentil"], [True] * len(t))
+            mpio = municipio_de_celdas(depto, tuple(t["h3"]))
+            t["nombre"] = t["h3"].map(mpio)
+            t["municipio"] = t["nombre"]
+            t["l1"] = [f"{n} especies con hábitat idóneo" for n in t["n"]]
+            t["l2"] = [f"Hotspot modelado (top {int(pct_hot*100)} %)" if nv else f"Percentil {pc:.0%}"
+                       for nv, pc in zip(t["nivel"], t["percentil"])]
+            t["l3"] = ""
+            t["vacio"] = False
+            hot_m = t[t["nivel"] == "Hotspot"]
+            items = [("Especies en el mapa", f"{p['species'].nunique():,}"),
+                     ("Hotspots modelados (hexágonos)", f"{len(hot_m):,}"),
+                     ("Municipio con más hotspots", hot_m["municipio"].value_counts().index[0] if len(hot_m) else "-")]
+            if union_sel is not None and len(hot_m):
+                lat, lon = np.array([h3.cell_to_latlng(c) for c in hot_m["h3"]]).T
+                prot = shapely.contains_xy(union_sel, lon, lat)
+                t.loc[hot_m.index, "vacio"] = ~prot
+                items.append(("Hotspots modelados sin protección", f"{int((~prot).sum())} de {len(hot_m)}"))
+            tarjetas(items)
+            dibujar_mapa(capas_hex(t, resaltar, solo_vacios), depto, nombres_mpio, capas_extra())
+            leyenda_sdm("Menos especies", "Más especies", True)
+            st.caption("Hexágonos de ≈5 km². Riqueza modelada = número de especies cuyo hábitat se estima idóneo. "
+                       "Es una predicción, no un inventario: sirve para orientar muestreos y priorizar, no reemplaza "
+                       "la caracterización en campo.")
+        else:
+            opciones = msel.sort_values(["amenazada", "species"], ascending=[False, True])
+            etiquetas = {r.species: f"{r.species} ({r.grupo}{' · ' + categorias_txt(r.uicn, r.mads) if categorias_txt(r.uicn, r.mads) else ''})"
+                         for r in opciones.itertuples()}
+            especie = st.selectbox("Especie (amenazadas primero)", list(etiquetas), format_func=etiquetas.get,
+                                   key="especie_sdm")
+            r = opciones.set_index("species").loc[especie]
+            pe = p[p["species"] == especie].rename(columns={"h3_7": "h3"})
+            escala = ((pe["idoneidad"] - r["umbral"]) / max(1 - r["umbral"], 1e-6)).clip(0, 1)
+            pe = pe.assign(color=colores_escala(escala, [True] * len(pe)), nivel="", vacio=False,
+                           nombre=especie, l1=[f"Idoneidad {v:.2f}" for v in pe["idoneidad"]],
+                           l2=f"Umbral de presencia: {r['umbral']:.2f}", l3="")
+            regs = df_todas_fuentes[df_todas_fuentes["species"] == especie]
+            puntos = pd.DataFrame({"lon": regs["lon"], "lat": regs["lat"], "nombre": especie,
+                                   "l1": regs["fuente"], "l2": regs["year"].map(lambda a: f"{int(a)}" if pd.notna(a) else ""),
+                                   "l3": ""})
+            items = [("Localidades usadas", f"{int(r['n_celdas'])}"),
+                     ("AUC espacial", f"{r['auc_espacial']:.2f}"),
+                     ("Hábitat idóneo", f"≈{len(pe) * 5.16:,.0f} km²")]
+            if union_sel is not None and len(pe):
+                lat, lon = np.array([h3.cell_to_latlng(c) for c in pe["h3"]]).T
+                items.append(("Hábitat idóneo protegido", f"{shapely.contains_xy(union_sel, lon, lat).mean():.0%}"))
+            tarjetas(items)
+            capa_puntos = pdk.Layer("ScatterplotLayer", data=puntos, get_position=["lon", "lat"],
+                                    get_fill_color=[20, 20, 20, 220], get_radius=60, radius_min_pixels=3,
+                                    stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=0.8,
+                                    pickable=True)
+            dibujar_mapa(capas_hex(pe, False), depto, nombres_mpio, capas_extra() + [capa_puntos])
+            leyenda_sdm("Idoneidad baja", "Idoneidad alta", False)
+            st.caption("Puntos negros: registros de la especie (todas las fuentes). AUC espacial: qué tan bien el "
+                       "modelo predice zonas que no usó para entrenar (0,5 = azar, 1 = perfecto; desde 0,7 es "
+                       "aceptable). Hábitat idóneo protegido: parte del hábitat idóneo dentro de las capas de "
+                       "conservación elegidas.")
 
 with tab_tiempo:
     st.write("Compara cómo cambia el mapa según el periodo de los registros.")
@@ -1127,6 +1304,20 @@ inventario (observada / Chao1) aparece al pasar el cursor por cada unidad.
 **Consulta por predio.** Busca los registros dentro del radio elegido alrededor del polígono
 subido, la distancia de cada especie al predio, el hotspot más cercano y las áreas de
 conservación que toca. La distancia y el área se calculan en EPSG:9377.
+
+**Sinónimos.** Los nombres de data/listas/sinonimos.csv se unifican al nombre aceptado (el que
+usa GBIF) antes de cualquier cálculo, para que una especie no cuente dos veces por llamarse
+distinto en cada fuente (p. ej. *Prosopis juliflora* y *Neltuma juliflora*).
+
+**Distribución modelada.** Modelos de distribución de especies (pipeline/06) por hexágono de
+≈5 km², con clima (WorldClim), relieve (SRTM) y cobertura de bosque actual (ESA WorldCover).
+Presencias: hexágonos con registros de la especie; fondo: hexágonos con registros de cualquier
+especie del mismo grupo (fondo de grupo objetivo, que compensa el sesgo de muestreo). Modelo de
+presencia/fondo equivalente a MaxEnt (regresión logística regularizada con términos cuadráticos),
+validado con bloques espaciales; solo se muestran las especies con AUC espacial ≥ 0,7. Los
+hexágonos con condiciones fuera del rango muestreado no se predicen. Una especie está en un
+hexágono si la idoneidad supera el percentil 10 de sus presencias. La riqueza modelada es la
+suma de especies presentes; es una predicción y no reemplaza el muestreo en campo.
 
 **Grupos.** Aves, mamíferos, herpetos (reptiles y anfibios), invertebrados (insectos,
 arácnidos y otros) y flora. Con *Comparar grupos: por separado* (recomendado), la métrica se
