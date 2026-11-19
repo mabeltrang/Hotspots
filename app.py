@@ -126,6 +126,8 @@ st.markdown(f"""
   [data-testid="stSidebar"] button[data-variant="pills"][aria-pressed="true"] {{ background: {PURPLE} !important;
     border: 1.5px solid {PURPLE_MID} !important; }}
   [data-testid="stSidebar"] button[data-variant="pills"][aria-pressed="true"] * {{ color: #FFFFFF !important; font-weight: 700; }}
+  [data-testid="stSidebar"] button[kind="tertiary"] p {{ color: #C5B3F0 !important; font-size: 0.78rem;
+    text-decoration: underline; }}
   [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.2) !important; }}
   [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {{ background: rgba(255,255,255,0.08) !important; }}
 </style>
@@ -312,7 +314,25 @@ def riqueza_por_unidad(df, col, m):
     return pd.DataFrame.from_dict(filas, orient="index")
 
 
-def clasificar(tabla, umbral, pct_hotspot, metrica, cob_min):
+def puntaje_por_grupo(df, col, umbral, cob_min, metrica):
+    """Percentil (0-100) de la métrica dentro de cada grupo y su promedio por unidad.
+
+    Mezclar grupos en una sola rarefacción favorece las unidades con muestreos de varios grupos
+    (cada registro de otro grupo casi siempre es una especie nueva). Aquí cada grupo se compara
+    solo contra sí mismo y después se promedian los percentiles de los grupos con datos suficientes.
+    """
+    partes = {}
+    for g, sub in df.groupby("grupo"):
+        r = riqueza_por_unidad(sub, col, umbral)
+        ok = (r["n"] >= umbral) & r[metrica].notna() & (r["cobertura"] >= cob_min)
+        partes[g] = r.loc[ok, metrica].rank(pct=True, method="max") * 100
+    p = pd.DataFrame(partes).reindex(columns=[g for g in ORDEN_GRUPOS if g in partes])
+    salida = pd.DataFrame({"puntaje": p.mean(axis=1), "grupos_eval": p.notna().sum(axis=1)})
+    salida["grupos_txt"] = [" · ".join(f"{g} {v:.0f}" for g, v in fila.dropna().items()) for _, fila in p.iterrows()]
+    return salida
+
+
+def clasificar(tabla, umbral, pct_hotspot, metrica, cob_min, por_grupo=False):
     """Agrega nivel y color según el percentil de la métrica entre unidades con datos suficientes.
 
     Suficiente = al menos `umbral` registros y cobertura de muestra >= cob_min. Sin el filtro de
@@ -320,8 +340,12 @@ def clasificar(tabla, umbral, pct_hotspot, metrica, cob_min):
     incompletos) llegan al techo de la rarefacción y salen como falsos hotspots.
     """
     tabla = tabla.copy()
-    tabla["valor"] = tabla[metrica]
-    tabla["suficiente"] = (tabla["n"] >= umbral) & tabla["valor"].notna() & (tabla["cobertura"] >= cob_min)
+    if por_grupo:
+        tabla["valor"] = tabla["puntaje"]
+        tabla["suficiente"] = tabla["grupos_eval"].fillna(0) >= 1
+    else:
+        tabla["valor"] = tabla[metrica]
+        tabla["suficiente"] = (tabla["n"] >= umbral) & tabla["valor"].notna() & (tabla["cobertura"] >= cob_min)
     ok = tabla["suficiente"]
     tabla["percentil"] = np.nan
     tabla.loc[ok, "percentil"] = tabla.loc[ok, "valor"].rank(pct=True, method="max")
@@ -342,27 +366,38 @@ def clasificar(tabla, umbral, pct_hotspot, metrica, cob_min):
     etiqueta = {"Rarefactada": f"Rarefactada a {umbral} registros", "Chao1": "Chao1", "Observada": "Observada"}[metrica]
     # Tooltip: pydeck escapa el HTML de los valores, así que cada línea va en su propia columna
     tabla["l1"] = [f"{int(e)} especies observadas · {nv}" for e, nv in zip(tabla["especies"], tabla["nivel"])]
-    tabla["l2"] = [f"{etiqueta}: {v:.1f}".replace(".", ",") if pd.notna(v) else f"{etiqueta}: sin dato"
-                   for v in tabla["valor"]]
+    if por_grupo:
+        tabla["l2"] = [f"Puntaje {v:.0f}/100 ({g})" if pd.notna(v) else "Ningún grupo con datos suficientes"
+                       for v, g in zip(tabla["valor"], tabla["grupos_txt"])]
+    else:
+        tabla["l2"] = [f"{etiqueta}: {v:.1f}".replace(".", ",") if pd.notna(v) else f"{etiqueta}: sin dato"
+                       for v in tabla["valor"]]
     tabla["l3"] = [f"Inventario {c:.0%} completo (Chao1)" if pd.notna(c) else "" for c in tabla["completitud"]]
     tabla["protegido"], tabla["vacio"] = np.nan, False
     return tabla
 
 
-def por_celda(df, res, umbral, pct, metrica, cob_min):
+def por_celda(df, res, umbral, pct, metrica, cob_min, por_grupo=False):
     col = f"h3_{res}"
     mpio = df.groupby(col)["municipio"].agg(lambda m: m.mode().iat[0] if m.notna().any() else "Fuera del límite")
-    t = riqueza_por_unidad(df, col, umbral).join(mpio).rename_axis("h3").reset_index()
+    t = riqueza_por_unidad(df, col, umbral).join(mpio)
+    if por_grupo:
+        t = t.join(puntaje_por_grupo(df, col, umbral, cob_min, metrica))
+    t = t.rename_axis("h3").reset_index()
     t["nombre"] = t["municipio"]
-    return clasificar(t, umbral, pct, metrica, cob_min)
+    return clasificar(t, umbral, pct, metrica, cob_min, por_grupo)
 
 
-def por_municipio(df, depto, umbral, pct, metrica, cob_min):
+def por_municipio(df, depto, umbral, pct, metrica, cob_min, por_grupo=False):
     nombres, geoms, _ = cargar_municipios(depto)
-    t = riqueza_por_unidad(df.dropna(subset=["municipio"]), "municipio", umbral).reindex(nombres)
+    con_mpio = df.dropna(subset=["municipio"])
+    t = riqueza_por_unidad(con_mpio, "municipio", umbral)
+    if por_grupo:
+        t = t.join(puntaje_por_grupo(con_mpio, "municipio", umbral, cob_min, metrica))
+    t = t.reindex(nombres)
     t[["especies", "n"]] = t[["especies", "n"]].fillna(0).astype(int)
     t = t.rename_axis("municipio").reset_index()
-    t = clasificar(t, umbral, pct, metrica, cob_min)
+    t = clasificar(t, umbral, pct, metrica, cob_min, por_grupo)
     filas = []
     for (_, r), g in zip(t.iterrows(), geoms):
         for anillo in anillos(g):
@@ -698,11 +733,23 @@ def consultar_predio(predio, radio_km, datos, tabla, unidad, depto, capas, umbra
 
 
 # ================================================================ barra lateral
+def titulo_con_boton(titulo, texto_boton, clave_pills, valores):
+    """Título de un filtro con un botón a la derecha que vuelve a seleccionar todas sus opciones."""
+    c1, c2 = st.columns([3, 1])
+    c1.markdown(f"**{titulo}**")
+    c2.button(texto_boton, key=f"btn_{clave_pills}", type="tertiary",
+              on_click=lambda: st.session_state.update({clave_pills: list(valores)}))
+
+
 deptos = departamentos()
 if not deptos:
     st.title("Hotspots de biodiversidad")
     st.info("No hay datos todavía. Corre pipeline/01_procesar_gbif.py.")
     st.stop()
+
+# Valores iniciales de los filtros con botón "Todos" (se manejan por session_state, sin default=)
+for clave, inicial in {"pills_grupos": ORDEN_GRUPOS, "pills_origen": ORIGENES, "pills_amenaza": []}.items():
+    st.session_state.setdefault(clave, list(inicial))
 
 with st.sidebar:
     st.header("Filtros")
@@ -714,24 +761,35 @@ with st.sidebar:
                                format_func=lambda r: TAMANO_CELDA[r])
     metrica = st.radio("Métrica de riqueza", list(METRICAS), horizontal=True, key="metrica",
                        help=" ".join(f"{k}: {v}" for k, v in METRICAS.items()))
-    st.markdown("**Grupos**")
-    grupos_sel = st.pills("Grupos", ORDEN_GRUPOS, selection_mode="multi", default=ORDEN_GRUPOS,
+    titulo_con_boton("Grupos", "Todos", "pills_grupos", ORDEN_GRUPOS)
+    grupos_sel = st.pills("Grupos", ORDEN_GRUPOS, selection_mode="multi",
                           format_func=lambda g: f"{ICONOS_GRUPO[g]} {g}", label_visibility="collapsed",
                           key="pills_grupos") or []
+    combinar = st.radio("Comparar grupos", ["Por separado", "Todos juntos"], horizontal=True, key="combinar",
+                        disabled=len(grupos_sel) < 2,
+                        help="Por separado (recomendado): cada grupo se compara solo contra sí mismo y se "
+                             "promedian los percentiles. Todos juntos: una sola rarefacción con todos los "
+                             "registros, que favorece las zonas con muestreos de varios grupos.")
+    por_grupo = combinar == "Por separado" and len(grupos_sel) > 1
     st.markdown("**Fuente de los datos**")
     firma = firma_unergy()
     fuentes_disp = ["GBIF"] + (["Unergy"] if firma else [])
     fuentes_sel = st.pills("Fuente", fuentes_disp, selection_mode="multi", default=fuentes_disp,
                            format_func=lambda f: FUENTES[f], label_visibility="collapsed",
                            key="pills_fuente") or []
-    st.markdown("**Origen**")
-    origen_sel = st.pills("Origen", ORIGENES, selection_mode="multi", default=ORIGENES,
+    titulo_con_boton("Origen", "Todos", "pills_origen", ORIGENES)
+    origen_sel = st.pills("Origen", ORIGENES, selection_mode="multi",
                           format_func=lambda o: f"{ICONOS_ORIGEN[o]} {o}", label_visibility="collapsed",
                           key="pills_origen",
                           help="Según las listas de distribución de GBIF para Colombia "
                                "(pipeline/02_origen_especies.py). Deja solo «Endémica» para mapear endemismos.") or []
-    st.markdown("**Estado de amenaza**")
-    cats_sel = st.pills("Amenaza", list(CATEGORIAS), selection_mode="multi", default=[],
+    c1, c2, c3 = st.columns([2.2, 1.6, 1])
+    c1.markdown("**Estado de amenaza**")
+    c2.button("Solo amenazadas", key="btn_amenazadas", type="tertiary",
+              on_click=lambda: st.session_state.update(pills_amenaza=["CR", "EN", "VU"]))
+    c3.button("Todas", key="btn_todas_amenaza", type="tertiary",
+              on_click=lambda: st.session_state.update(pills_amenaza=[]))
+    cats_sel = st.pills("Amenaza", list(CATEGORIAS), selection_mode="multi",
                         format_func=lambda c: CATEGORIAS[c], label_visibility="collapsed",
                         key="pills_amenaza",
                         help="Sin selección cuenta todas las especies. Al elegir una o varias categorías, "
@@ -743,7 +801,10 @@ with st.sidebar:
                               help="UICN: Lista Roja global. MADS: Resolución 0126 de 2024.") or []
     else:
         fuentes_am = ["UICN", "MADS"]
-    pct_hot = st.slider("Hotspots: % de unidades con más especies", 5, 25, 10, step=5) / 100
+    pct_hot = st.slider("Qué % de unidades marcar como hotspot", 5, 25, 10, step=5,
+                        help="Con 10, se marca como hotspot el 10 % de las unidades con mayor riqueza "
+                             "(entre las que tienen datos suficientes). No es un número de especies: "
+                             "subirlo marca más zonas, bajarlo deja solo las más ricas.") / 100
     resaltar = st.checkbox("Resaltar hotspots", value=True)
     nombres_mpio = st.checkbox("Nombres de municipios", value=True)
 
@@ -833,9 +894,9 @@ def capas_proyectos():
 
 def construir(datos):
     if unidad == "Hexágonos":
-        t = marcar_proteccion(por_celda(datos, res, umbral, pct_hot, metrica, cob_min), unidad, depto, union_sel)
+        t = marcar_proteccion(por_celda(datos, res, umbral, pct_hot, metrica, cob_min, por_grupo), unidad, depto, union_sel)
         return t, capas_hex(t, resaltar, solo_vacios)
-    t, poligonos = por_municipio(datos, depto, umbral, pct_hot, metrica, cob_min)
+    t, poligonos = por_municipio(datos, depto, umbral, pct_hot, metrica, cob_min, por_grupo)
     t = marcar_proteccion(t, unidad, depto, union_sel)
     poligonos = poligonos.drop(columns=["protegido", "vacio", "l3"]).merge(
         t[["municipio", "protegido", "vacio", "l3"]], on="municipio", how="left")
@@ -1044,7 +1105,10 @@ subido, la distancia de cada especie al predio, el hotspot más cercano y las á
 conservación que toca. La distancia y el área se calculan en EPSG:9377.
 
 **Grupos.** Aves, mamíferos, herpetos (reptiles y anfibios), invertebrados (insectos,
-arácnidos y otros) y flora.
+arácnidos y otros) y flora. Con *Comparar grupos: por separado* (recomendado), la métrica se
+calcula para cada grupo, cada unidad recibe su percentil dentro del grupo y el puntaje (0-100)
+es el promedio de los grupos con datos suficientes. Así un muestreo de flora no compite con uno
+de aves, y una zona con monitoreos de varios grupos no sale rica solo por mezclar grupos.
 
 **Origen.** Endémica, nativa o introducida según las listas de distribución para Colombia
 que reúne GBIF (por ejemplo GRIIS Colombia y el Catálogo de Plantas y Líquenes de Colombia).
