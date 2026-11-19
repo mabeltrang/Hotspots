@@ -1170,6 +1170,10 @@ with tab_sdm:
         if p.empty:
             st.info("Ninguna especie modelada cumple los filtros actuales.")
         elif vista_sdm == "Riqueza modelada":
+            st.warning("Mapa exploratorio. En la prueba de sensibilidad los hotspots modelados cambiaron de lugar "
+                       "al quitar los datos de los monitoreos mineros: la riqueza modelada todavía sigue en parte "
+                       "a dónde se ha muestreado. Úsalo para orientar muestreos, no como conclusión. Los mapas por "
+                       "especie con AUC alto son más confiables.")
             t = p.groupby("h3_7")["species"].nunique().rename("n").reset_index().rename(columns={"h3_7": "h3"})
             t["percentil"] = t["n"].rank(pct=True, method="max")
             t["nivel"] = np.where(t["percentil"] > 1 - pct_hot, "Hotspot", "")
