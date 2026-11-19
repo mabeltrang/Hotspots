@@ -4,6 +4,7 @@ Hotspots de biodiversidad por departamento.
 Correr:  streamlit run app.py
 Datos:   data/procesados/<departamento>/registros.parquet  (pipeline/01_procesar_gbif.py)
          data/unergy/*.xlsx                                 (inventarios Unergy, opcional)
+         data/car/*.xlsx                                    (árboles de resoluciones de la CAR, opcional)
          data/limites/municipios_colombia.geojson           (DANE, MGN 2018)
          data/capas/<departamento>/*.geojson                (áreas protegidas, opcional; pipeline/05)
 """
@@ -32,6 +33,8 @@ st.set_page_config(page_title="Hotspots de biodiversidad", page_icon="🌿", lay
 RAIZ = Path(__file__).parent
 CARPETA_DATOS = RAIZ / "data" / "procesados"
 CARPETA_UNERGY = RAIZ / "data" / "unergy"
+CARPETA_CAR = RAIZ / "data" / "car"
+CARPETAS_INVENTARIO = {"Unergy": CARPETA_UNERGY, "CAR": CARPETA_CAR}
 ARCHIVO_LIMITES = RAIZ / "data" / "limites" / "municipios_colombia.geojson"
 CARPETA_LISTAS = RAIZ / "data" / "listas"
 CARPETA_CAPAS = RAIZ / "data" / "capas"
@@ -52,7 +55,7 @@ ICONOS_ORIGEN = {"Endémica": "⭐", "Nativa": "🌱", "Introducida": "🚩", "S
 CATEGORIAS = {"CR": "🔴 CR · En peligro crítico", "EN": "🟠 EN · En peligro", "VU": "🟡 VU · Vulnerable",
               "NT": "🟢 NT · Casi amenazada", "LC": "🔵 LC · Preocupación menor",
               "DD": "⚪ DD · Datos insuficientes", "NE": "⚫ NE · No evaluada"}
-FUENTES = {"GBIF": "🌐 GBIF", "Unergy": "🌳 Unergy"}
+FUENTES = {"GBIF": "🌐 GBIF", "Unergy": "🌳 Unergy", "CAR": "🏛️ Resoluciones CAR"}
 METRICAS = {
     "Rarefactada": "Especies esperadas si todas las unidades tuvieran el mismo número de registros "
                    "(el mínimo de registros de Opciones avanzadas). Corrige la diferencia de muestreo entre unidades.",
@@ -154,16 +157,20 @@ def cargar_gbif(depto):
 
 
 def firma_unergy():
-    if not CARPETA_UNERGY.exists():
-        return ()
-    return tuple((p.name, p.stat().st_mtime) for p in sorted(CARPETA_UNERGY.glob("*.xlsx")))
+    """Archivos de inventario (Unergy y CAR) con su fecha de modificación, para recalcular si cambian."""
+    return tuple((fuente, p.name, p.stat().st_mtime) for fuente, carpeta in CARPETAS_INVENTARIO.items()
+                 if carpeta.exists() for p in sorted(carpeta.glob("*.xlsx")))
 
 
 @st.cache_data
 def cargar_inventarios(firma):
-    if not firma:
-        return None, []
-    return cargar_unergy(CARPETA_UNERGY)
+    tablas, avisos = [], []
+    for fuente in sorted({f for f, _, _ in firma}):
+        t, a = cargar_unergy(CARPETAS_INVENTARIO[fuente], fuente)
+        avisos += a
+        if t is not None:
+            tablas.append(t)
+    return (pd.concat(tablas, ignore_index=True) if tablas else None), avisos
 
 
 @st.cache_resource
@@ -242,7 +249,7 @@ def preparar(depto, firma, firma_l):
         unergy = unergy.drop(columns="departamento") if len(unergy) else None
     df = df.assign(fuente="GBIF")
     if unergy is not None:
-        df = pd.concat([df, unergy.assign(fuente="Unergy")], ignore_index=True)
+        df = pd.concat([df, unergy], ignore_index=True)
     df = df.assign(grupo=df["grupo"].map(GRUPOS)).dropna(subset=["grupo"])
     df["origen"] = "Sin dato"
     arch_origen = CARPETA_LISTAS / f"origen_{depto}.csv"
@@ -703,7 +710,8 @@ def consultar_predio(predio, radio_km, datos, tabla, unidad, depto, capas, umbra
     zona_txt = f"en un radio de {radio_km:g} km alrededor del predio" if radio_km > 0 else "dentro del predio"
     partes = [f"{zona_txt[0].upper()}{zona_txt[1:]} hay {len(sel):,} registros de {n_sp:,} especies "
               f"({', '.join(sorted(sel['grupo'].unique())) or 'ningún grupo'}), según GBIF (https://doi.org/{doi})"
-              f"{' e inventarios de Unergy' if (sel['fuente'] == 'Unergy').any() else ''}."]
+              f"{' e inventarios de Unergy' if (sel['fuente'] == 'Unergy').any() else ''}"
+              f"{' y árboles de resoluciones de la CAR' if (sel['fuente'] == 'CAR').any() else ''}."]
     if n_sp:
         partes.append(f"De ellas, {len(amen)} están en alguna categoría de amenaza (Lista Roja UICN o "
                       f"Res. 0126 de 2024 del MADS){': ' + lista_amen if len(amen) else ''}. "
@@ -773,7 +781,7 @@ with st.sidebar:
     por_grupo = combinar == "Por separado" and len(grupos_sel) > 1
     st.markdown("**Fuente de los datos**")
     firma = firma_unergy()
-    fuentes_disp = ["GBIF"] + (["Unergy"] if firma else [])
+    fuentes_disp = ["GBIF"] + sorted({f for f, _, _ in firma}, key=list(FUENTES).index)
     fuentes_sel = st.pills("Fuente", fuentes_disp, selection_mode="multi", default=fuentes_disp,
                            format_func=lambda f: FUENTES[f], label_visibility="collapsed",
                            key="pills_fuente") or []
@@ -819,7 +827,7 @@ with st.sidebar:
     union_sel = union_capas(depto, tuple(capas_sel), firma_c)
 
     st.divider()
-    st.subheader("Datos Unergy")
+    st.subheader("Inventarios (Unergy y CAR)")
 
     with st.expander("Opciones avanzadas"):
         umbral_def = {5: 50, 6: 20, 7: 10, 8: 5}[res] if unidad == "Hexágonos" else 20
@@ -844,8 +852,9 @@ with st.sidebar:
         st.caption("Aún no hay inventarios para este departamento. Agrega Excel en data/unergy/ "
                    "con el formato de plantillas/inventario_unergy.xlsx.")
     else:
-        st.caption(f"{unergy['species'].nunique():,} especies en "
-                   f"{unergy['institutionCode'].nunique()} proyecto(s).")
+        for fuente, sub in unergy.groupby("fuente"):
+            st.caption(f"{FUENTES[fuente]}: {sub['species'].nunique():,} especies en "
+                       f"{sub['institutionCode'].nunique()} proyecto(s) o resolución(es).")
     if avisos:
         with st.expander("Revisión de los Excel"):
             for a in avisos:
@@ -912,7 +921,7 @@ doi = meta.get("doi_gbif", "")
 st.markdown(f"""<div class="unergy-header"><div class="unergy-logo">🌿</div><div>
 <h1>Hotspots de biodiversidad en {depto.title()}</h1>
 <p>Unergy · Equipo forestal · Riqueza de especies registrada ({', '.join(grupos_sel) or 'sin grupos'}).
-Fuente: <a href="https://doi.org/{doi}" target="_blank">GBIF {doi}</a>{' e inventarios Unergy' if 'Unergy' in fuentes_sel else ''}</p>
+Fuente: <a href="https://doi.org/{doi}" target="_blank">GBIF {doi}</a>{' e inventarios Unergy' if 'Unergy' in fuentes_sel else ''}{' y resoluciones CAR' if 'CAR' in fuentes_sel else ''}</p>
 </div></div>""", unsafe_allow_html=True)
 
 
