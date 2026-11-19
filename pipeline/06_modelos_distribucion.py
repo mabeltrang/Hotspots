@@ -31,6 +31,9 @@ Salidas (subir a data/procesados/<depto>/):
 Uso (Colab o local):
     python pipeline/06_modelos_distribucion.py --depto cesar --covariables /ruta/covariables_cesar.tif
 
+Opción --desagrupar: cada zona de ~250 km² pesa igual en el ajuste (menos peso a zonas con
+monitoreo intensivo, sin descartar datos).
+
 Prueba de sensibilidad (no guarda archivos, solo imprime el resumen): repetir sin los registros de
 ciertas instituciones para ver si los hotspots modelados dependen de ellas.
     python pipeline/06_modelos_distribucion.py --covariables ... --excluir "Prodeco,Drummond"
@@ -61,6 +64,7 @@ from unergy import cargar_unergy, normalizar_texto  # noqa: E402
 
 RES = 7                # hexágonos de ~5 km²
 RES_BLOQUE = 4         # bloques para la validación espacial
+RES_DECLUSTER = 5      # zonas de ~250 km² que pesan igual en el ajuste (ver pesos_espaciales)
 MIN_CELDAS = 20        # localidades (hexágonos) mínimas por especie
 MIN_FONDO = 100        # hexágonos mínimos de fondo por grupo
 N_PLIEGUES = 4
@@ -146,15 +150,31 @@ def modelo():
                          LogisticRegression(C=C_REGULARIZACION, class_weight="balanced", max_iter=3000))
 
 
-def auc_espacial(x, y, bloques):
+def pesos_espaciales(celdas, y):
+    """Peso 1/(n hexágonos de la misma clase en la misma zona de ~250 km²), normalizado.
+
+    Una zona muy muestreada (p. ej. un área minera con monitoreo continuo) aporta muchos
+    hexágonos casi iguales; con estos pesos cada zona cuenta lo mismo en el ajuste, sin
+    descartar datos (desagrupamiento espacial; Kramer-Schadt et al. 2013, Boria et al. 2014).
+    """
+    zonas = pd.Series([h3.cell_to_parent(c, RES_DECLUSTER) for c in celdas])
+    clave = zonas + "_" + pd.Series(y).astype(str)
+    w = 1.0 / clave.map(clave.value_counts()).to_numpy()
+    for clase in (0, 1):  # cada clase conserva su peso total
+        w[y == clase] *= (y == clase).sum() / w[y == clase].sum()
+    return w
+
+
+def auc_espacial(x, y, bloques, w):
     if len(set(bloques[y == 1])) < 2:
         return np.nan
+    w = np.ones(len(y)) if w is None else w
     aucs = []
     for ent, pru in GroupKFold(n_splits=min(N_PLIEGUES, len(set(bloques)))).split(x, y, bloques):
         if y[pru].min() == y[pru].max() or y[ent].sum() < 5:
             continue
-        m = modelo().fit(x[ent], y[ent])
-        aucs.append(roc_auc_score(y[pru], m.predict_proba(x[pru])[:, 1]))
+        m = modelo().fit(x[ent], y[ent], logisticregression__sample_weight=w[ent])
+        aucs.append(roc_auc_score(y[pru], m.predict_proba(x[pru])[:, 1], sample_weight=w[pru]))
     return float(np.mean(aucs)) if aucs else np.nan
 
 
@@ -163,11 +183,15 @@ def main():
     ap.add_argument("--depto", default="cesar")
     ap.add_argument("--covariables", required=True)
     ap.add_argument("--excluir", default="", help="instituciones a excluir, separadas por coma (prueba de sensibilidad)")
+    ap.add_argument("--desagrupar", action="store_true",
+                    help="cada zona de ~250 km² pesa igual en el ajuste (reduce el peso de zonas muy muestreadas)")
     args = ap.parse_args()
+    desagrupar = args.desagrupar
     excluir = tuple(x.strip() for x in args.excluir.split(",") if x.strip())
     depto = normalizar_texto(args.depto)
     salida = RAIZ / "data" / "procesados" / depto
 
+    print("Desagrupamiento espacial:", "sí" if desagrupar else "no")
     reg = cargar_registros(depto, excluir)
     celdas = celdas_departamento(depto)
     reg = reg[reg[f"h3_{RES}"].isin(celdas)]
@@ -193,8 +217,9 @@ def main():
             bloques = np.array([h3.cell_to_parent(c, RES_BLOQUE) for c in celdas_m])
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                auc = auc_espacial(x, y, bloques)
-                m = modelo().fit(x, y)
+                w = pesos_espaciales(celdas_m, y) if desagrupar else np.ones(len(y))
+                auc = auc_espacial(x, y, bloques, w)
+                m = modelo().fit(x, y, logisticregression__sample_weight=w)
                 idon_pres = m.predict_proba(cov.loc[sorted(pres)].to_numpy())[:, 1]
                 umbral = float(np.percentile(idon_pres, 10))
                 idon = m.predict_proba(x_todo)[:, 1]
@@ -220,6 +245,7 @@ def main():
     met.to_csv(salida / "sdm_metricas.csv", index=False)
     (salida / "sdm_info.json").write_text(json.dumps({
         "fecha": date.today().isoformat(), "resolucion_h3": RES, "covariables": list(cov.columns),
+        "desagrupado": desagrupar,
         "min_celdas": MIN_CELDAS, "auc_min": AUC_MIN, "especies_modeladas": len(met),
         "especies_validas": int(met["valido"].sum()) if len(met) else 0}, ensure_ascii=False, indent=1))
     print(f"Archivos en {salida.relative_to(RAIZ)}: sdm_idoneidad.parquet, sdm_metricas.csv, sdm_info.json")
