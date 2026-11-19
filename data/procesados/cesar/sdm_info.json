@@ -9,10 +9,13 @@
   "bio17",
   "elevacion",
   "pendiente",
-  "cobertura_arborea"
+  "cobertura_arborea",
+  "arbustal",
+  "herbazal",
+  "humedal"
  ],
  "min_celdas": 20,
  "auc_min": 0.7,
- "especies_modeladas": 677,
- "especies_validas": 256
+ "especies_modeladas": 675,
+ "especies_validas": 217
 }
