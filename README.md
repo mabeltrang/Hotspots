@@ -47,6 +47,11 @@ En Streamlit Cloud: Main file path = `app.py`.
 3. `pip install pyshp shapely pyproj` y `python pipeline/05_capas_conservacion.py`.
 4. Subir `data/capas/<departamento>/` a GitHub.
 
+Atajo con Google Earth Engine: si las capas ya están como assets en GEE (RUNAP, Ley 2ª, REAA,
+OMEC, bosque seco), pegar `pipeline/gee_exportar_capas.js` en el Code Editor, correr las
+exportaciones y guardar los GeoJSON que llegan a Drive directamente en `data/capas/<departamento>/`
+(no hace falta el paso 3).
+
 Con las capas, la app calcula el % protegido de cada hotspot y marca los vacíos de conservación
 (hotspots con menos del 10 % de su área dentro de las capas).
 

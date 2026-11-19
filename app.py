@@ -312,11 +312,16 @@ def riqueza_por_unidad(df, col, m):
     return pd.DataFrame.from_dict(filas, orient="index")
 
 
-def clasificar(tabla, umbral, pct_hotspot, metrica):
-    """Agrega nivel y color según el percentil de la métrica entre unidades con datos suficientes."""
+def clasificar(tabla, umbral, pct_hotspot, metrica, cob_min):
+    """Agrega nivel y color según el percentil de la métrica entre unidades con datos suficientes.
+
+    Suficiente = al menos `umbral` registros y cobertura de muestra >= cob_min. Sin el filtro de
+    cobertura, las unidades donde casi cada registro es una especie distinta (inventarios muy
+    incompletos) llegan al techo de la rarefacción y salen como falsos hotspots.
+    """
     tabla = tabla.copy()
     tabla["valor"] = tabla[metrica]
-    tabla["suficiente"] = (tabla["n"] >= umbral) & tabla["valor"].notna()
+    tabla["suficiente"] = (tabla["n"] >= umbral) & tabla["valor"].notna() & (tabla["cobertura"] >= cob_min)
     ok = tabla["suficiente"]
     tabla["percentil"] = np.nan
     tabla.loc[ok, "percentil"] = tabla.loc[ok, "valor"].rank(pct=True, method="max")
@@ -335,28 +340,29 @@ def clasificar(tabla, umbral, pct_hotspot, metrica):
     rgb = (PALETA[i] * (1 - t) + PALETA[i + 1] * t).astype(int)
     tabla["color"] = [[int(v) for v in c] + [ALFA] if s else GRIS for c, s in zip(rgb, ok)]
     etiqueta = {"Rarefactada": f"Rarefactada a {umbral} registros", "Chao1": "Chao1", "Observada": "Observada"}[metrica]
-    tabla["valor_txt"] = [f"{etiqueta}: {v:,.1f}" if pd.notna(v) else f"{etiqueta}: sin dato" for v in tabla["valor"]]
-    completitud_txt = [f"<br/>Inventario {c:.0%} completo (Chao1)" if pd.notna(c) else "" for c in tabla["completitud"]]
-    tabla["detalle"] = [f"{int(e)} especies observadas<br/>{v}{c}<br/>{nv}" for e, v, c, nv
-                        in zip(tabla["especies"], tabla["valor_txt"], completitud_txt, tabla["nivel"])]
+    # Tooltip: pydeck escapa el HTML de los valores, así que cada línea va en su propia columna
+    tabla["l1"] = [f"{int(e)} especies observadas · {nv}" for e, nv in zip(tabla["especies"], tabla["nivel"])]
+    tabla["l2"] = [f"{etiqueta}: {v:.1f}".replace(".", ",") if pd.notna(v) else f"{etiqueta}: sin dato"
+                   for v in tabla["valor"]]
+    tabla["l3"] = [f"Inventario {c:.0%} completo (Chao1)" if pd.notna(c) else "" for c in tabla["completitud"]]
     tabla["protegido"], tabla["vacio"] = np.nan, False
     return tabla
 
 
-def por_celda(df, res, umbral, pct, metrica):
+def por_celda(df, res, umbral, pct, metrica, cob_min):
     col = f"h3_{res}"
     mpio = df.groupby(col)["municipio"].agg(lambda m: m.mode().iat[0] if m.notna().any() else "Fuera del límite")
     t = riqueza_por_unidad(df, col, umbral).join(mpio).rename_axis("h3").reset_index()
     t["nombre"] = t["municipio"]
-    return clasificar(t, umbral, pct, metrica)
+    return clasificar(t, umbral, pct, metrica, cob_min)
 
 
-def por_municipio(df, depto, umbral, pct, metrica):
+def por_municipio(df, depto, umbral, pct, metrica, cob_min):
     nombres, geoms, _ = cargar_municipios(depto)
     t = riqueza_por_unidad(df.dropna(subset=["municipio"]), "municipio", umbral).reindex(nombres)
     t[["especies", "n"]] = t[["especies", "n"]].fillna(0).astype(int)
     t = t.rename_axis("municipio").reset_index()
-    t = clasificar(t, umbral, pct, metrica)
+    t = clasificar(t, umbral, pct, metrica, cob_min)
     filas = []
     for (_, r), g in zip(t.iterrows(), geoms):
         for anillo in anillos(g):
@@ -384,6 +390,8 @@ def marcar_proteccion(tabla, unidad, depto, union):
         fr.append(g.intersection(union).area / g.area if g.area else 0.0)
     tabla.loc[es_hot, "protegido"] = fr
     tabla["vacio"] = es_hot & (tabla["protegido"].fillna(1) < UMBRAL_VACIO)
+    tabla.loc[es_hot, "l3"] = [f"{l} · {p:.0%} protegido" if l else f"{p:.0%} protegido"
+                               for l, p in zip(tabla.loc[es_hot, "l3"], tabla.loc[es_hot, "protegido"])]
     return tabla
 
 
@@ -412,13 +420,20 @@ def capas_limites(depto, mostrar_nombres):
     return capas
 
 
+TOOLTIP_HTML = ('<div style="font-weight:700;font-size:13px;margin-bottom:3px">{nombre}</div>'
+                '<div>{l1}</div><div>{l2}</div><div style="color:#6B6B80">{l3}</div>')
+TOOLTIP_ESTILO = {"backgroundColor": "#FFFFFF", "color": "#1A1A2E", "fontSize": "12px", "lineHeight": "1.45",
+                  "padding": "8px 12px", "borderRadius": "8px", "borderLeft": f"4px solid {PURPLE}",
+                  "boxShadow": "0 2px 8px rgba(0,0,0,0.18)", "maxWidth": "280px"}
+
+
 def dibujar_mapa(capas_datos, depto, mostrar_nombres, extra=None, alto=640, vista=None):
     if vista is None:
         _, _, contorno = cargar_municipios(depto)
         minx, miny, maxx, maxy = contorno.bounds
         vista = pdk.ViewState(latitude=(miny + maxy) / 2, longitude=(minx + maxx) / 2, zoom=7.1)
     capas = capas_datos + capas_limites(depto, mostrar_nombres) + (extra or [])
-    tooltip = {"html": "<b>{nombre}</b><br/>{detalle}", "style": {"fontSize": "12px"}}
+    tooltip = {"html": TOOLTIP_HTML, "style": TOOLTIP_ESTILO}
     st.pydeck_chart(pdk.Deck(layers=capas, initial_view_state=vista, tooltip=tooltip,
                              map_provider="carto", map_style="light_no_labels"),
                     width="stretch", height=alto)
@@ -460,7 +475,7 @@ def capas_conservacion(capas, seleccion):
                       pickable=False)]
 
 
-def leyenda(pct, umbral, metrica, con_capas=False):
+def leyenda(pct, umbral, metrica, cob_min, con_capas=False):
     stops = ", ".join(f"rgb({r},{g},{b})" for r, g, b in PALETA)
     capas_html = (f'<span style="margin-left:16px;display:inline-block;width:14px;height:14px;'
                   f'background:rgba({",".join(map(str, COLOR_CAPAS))},.15);border:2px solid {COLOR_CAPAS_HEX}"></span>'
@@ -473,7 +488,7 @@ def leyenda(pct, umbral, metrica, con_capas=False):
         <span style="margin-left:16px;display:inline-block;width:14px;height:14px;border:2.5px solid {COLOR_HOTSPOT_HEX}"></span>
         <span>Hotspot ({int(pct*100)} % con mayor riqueza)</span>
         <span style="margin-left:16px;display:inline-block;width:14px;height:14px;background:rgba(190,190,190,.5)"></span>
-        <span>Pocos datos (menos de {umbral} registros)</span>{capas_html}</div>""",
+        <span>Pocos datos (menos de {umbral} registros o cobertura menor a {cob_min:.0%})</span>{capas_html}</div>""",
         unsafe_allow_html=True)
     st.caption("El color es relativo dentro del departamento (percentil de riqueza). "
                "Las zonas sin color no tienen registros: es falta de muestreo, no ausencia de especies.")
@@ -582,9 +597,11 @@ def capas_predio(predio, zona, sel):
                               [[90, 90, 90, 160]]))
     puntos = pd.DataFrame({
         "lon": sel["lon"], "lat": sel["lat"], "color": color.tolist(), "nombre": sel["species"],
-        "detalle": [f"{g} · UICN {u if pd.notna(u) else 'NE'} · MADS {m if pd.notna(m) else '-'}"
-                    f"<br/>{f if pd.notna(f) else 'Sin fuente'} {int(a) if pd.notna(a) else ''}"
-                    for g, u, m, f, a in zip(sel["grupo"], sel["uicn"], sel["mads"], sel["fuente"], sel["year"])],
+        "l1": [f"{g} · UICN {u if pd.notna(u) else 'NE'} · MADS {m if pd.notna(m) else '-'}"
+               for g, u, m in zip(sel["grupo"], sel["uicn"], sel["mads"])],
+        "l2": [f"{f if pd.notna(f) else 'Sin fuente'} {int(a) if pd.notna(a) else ''}".strip()
+               for f, a in zip(sel["fuente"], sel["year"])],
+        "l3": "",
     })
     lineas = [{"path": a} for a in anillos(predio)] if predio.geom_type in ("Polygon", "MultiPolygon") else []
     capas = [pdk.Layer("PolygonLayer", data=[{"poligono": a} for a in anillos(zona)], get_polygon="poligono",
@@ -753,6 +770,10 @@ with st.sidebar:
                                  key=f"umbral_{unidad}_{res}",
                                  help="Por debajo de este valor no hay muestreo suficiente para "
                                       "comparar; la unidad se muestra en gris.")
+        cob_min = st.slider("Cobertura mínima de muestra", 0.0, 0.9, 0.5, 0.05, key="cob_min",
+                            help="Proporción de la comunidad representada en los registros (Chao y Jost 2012). "
+                                 "Las unidades por debajo se muestran en gris: tienen tan pocos registros "
+                                 "repetidos que no se pueden comparar.")
         archivo_proy = st.file_uploader("Proyectos (CSV con nombre, lat, lon)", type="csv")
 
 df, meta, unergy, avisos = preparar(depto, firma, firma_listas())
@@ -812,12 +833,12 @@ def capas_proyectos():
 
 def construir(datos):
     if unidad == "Hexágonos":
-        t = marcar_proteccion(por_celda(datos, res, umbral, pct_hot, metrica), unidad, depto, union_sel)
+        t = marcar_proteccion(por_celda(datos, res, umbral, pct_hot, metrica, cob_min), unidad, depto, union_sel)
         return t, capas_hex(t, resaltar, solo_vacios)
-    t, poligonos = por_municipio(datos, depto, umbral, pct_hot, metrica)
+    t, poligonos = por_municipio(datos, depto, umbral, pct_hot, metrica, cob_min)
     t = marcar_proteccion(t, unidad, depto, union_sel)
-    poligonos = poligonos.drop(columns=["protegido", "vacio"]).merge(
-        t[["municipio", "protegido", "vacio"]], on="municipio", how="left")
+    poligonos = poligonos.drop(columns=["protegido", "vacio", "l3"]).merge(
+        t[["municipio", "protegido", "vacio", "l3"]], on="municipio", how="left")
     return t, capas_mpio(poligonos, resaltar, solo_vacios)
 
 
@@ -858,7 +879,7 @@ with tab_mapa:
         items.append(("Hotspots sin protección", f"{int(hot['vacio'].sum())} de {len(hot)}"))
     tarjetas(items)
     dibujar_mapa(capas, depto, nombres_mpio, capas_extra())
-    leyenda(pct_hot, umbral, metrica, bool(capas_sel))
+    leyenda(pct_hot, umbral, metrica, cob_min, bool(capas_sel))
 
     st.markdown("#### Descargar hotspots")
     if hot.empty:
@@ -966,7 +987,7 @@ with tab_tiempo:
             st.caption(f"{rango[0]} a {rango[1]}: {sub['species'].nunique():,} especies, "
                        f"{(t_sub['nivel'] == 'Hotspot').sum()} hotspots.")
             dibujar_mapa(capas_sub, depto, nombres_mpio, capas_extra(), alto=560)
-            leyenda(pct_hot, umbral, metrica, bool(capas_sel))
+            leyenda(pct_hot, umbral, metrica, cob_min, bool(capas_sel))
 
 with tab_detalle:
     st.subheader("Especies por municipio")
@@ -1003,7 +1024,10 @@ with tab_metodo:
     st.markdown(f"""
 **Qué muestra el mapa.** La riqueza de especies de cada unidad (hexágono o municipio), con la
 métrica elegida. El color es el percentil dentro del departamento y los hotspots son el
-{int(pct_hot*100)} % de unidades con mayor riqueza, entre las que tienen al menos {umbral} registros.
+{int(pct_hot*100)} % de unidades con mayor riqueza, entre las que tienen al menos {umbral} registros
+y una cobertura de muestra de al menos {cob_min:.0%} (Chao y Jost 2012). Sin ese filtro, las unidades
+donde casi cada registro es una especie distinta (inventarios muy incompletos) saldrían como falsos
+hotspots.
 
 **Métricas de riqueza.** *Rarefactada*: especies esperadas en {umbral} registros, calculada para
 cada unidad (Hurlbert 1971); pone a todas las unidades en el mismo esfuerzo de muestreo y es la
