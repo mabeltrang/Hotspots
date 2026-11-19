@@ -8,3 +8,4 @@ openpyxl
 pyproj
 shapely>=2.0
 requests
+pyshp>=2.3

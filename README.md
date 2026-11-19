@@ -37,6 +37,31 @@ En Streamlit Cloud: Main file path = `app.py`.
 - `python pipeline/03_amenaza_especies.py` (después del 02) trae la categoría UICN y el estado
   nacional que reportan las listas de GBIF; guarda `data/listas/amenaza_cesar.csv`.
 
+## Capas de conservación (áreas protegidas, Ley 2ª, POMCA)
+
+1. Descargar el shapefile del RUNAP (https://runap.parquesnacionales.gov.co) y, si se quiere,
+   otras capas (reservas de Ley 2ª, zonificación de POMCA de la CAR). Guardarlas en `data/crudos/`
+   como .zip (con .shp, .shx, .dbf y .prj), GeoJSON, KML o KMZ.
+2. Editar `DEPTO` y `CAPAS` al inicio de `pipeline/05_capas_conservacion.py` (nombre del archivo y
+   de los campos con el nombre y la categoría de cada área; si no los sabes, el script los imprime).
+3. `pip install pyshp shapely pyproj` y `python pipeline/05_capas_conservacion.py`.
+4. Subir `data/capas/<departamento>/` a GitHub.
+
+Con las capas, la app calcula el % protegido de cada hotspot y marca los vacíos de conservación
+(hotspots con menos del 10 % de su área dentro de las capas).
+
+## Métricas de riqueza
+
+- Rarefactada (por defecto): especies esperadas en el mínimo de registros de Opciones avanzadas
+  (Hurlbert 1971). Es la que corrige la diferencia de muestreo entre unidades.
+- Chao1: riqueza estimada (Chao 1987). Observada: sin corrección.
+
+## Consulta por predio
+
+Pestaña para subir el polígono de un predio (KMZ, KML, GeoJSON o shapefile en .zip) y obtener las
+especies registradas en un radio, amenazadas y endémicas, distancia al hotspot más cercano, áreas
+de conservación que toca y un texto de resumen para el informe.
+
 ## Actualizar GBIF o agregar otro departamento
 
 1. Descargar de GBIF (formato Simple) y guardar el CSV o zip en `data/crudos/`

@@ -5,9 +5,11 @@ Correr:  streamlit run app.py
 Datos:   data/procesados/<departamento>/registros.parquet  (pipeline/01_procesar_gbif.py)
          data/unergy/*.xlsx                                 (inventarios Unergy, opcional)
          data/limites/municipios_colombia.geojson           (DANE, MGN 2018)
+         data/capas/<departamento>/*.geojson                (áreas protegidas, opcional; pipeline/05)
 """
 import io
 import json
+import math
 import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -16,13 +18,13 @@ import numpy as np
 import pandas as pd
 import h3
 import pydeck as pdk
-import pyproj
 import shapely
 import streamlit as st
 from shapely.geometry import Polygon, mapping, shape
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
+from geodatos import FORMATOS, a_plano, a_wgs84, leer_vector
 from unergy import cargar_unergy, normalizar_texto
 
 st.set_page_config(page_title="Hotspots de biodiversidad", page_icon="🌿", layout="wide")
@@ -32,6 +34,7 @@ CARPETA_DATOS = RAIZ / "data" / "procesados"
 CARPETA_UNERGY = RAIZ / "data" / "unergy"
 ARCHIVO_LIMITES = RAIZ / "data" / "limites" / "municipios_colombia.geojson"
 CARPETA_LISTAS = RAIZ / "data" / "listas"
+CARPETA_CAPAS = RAIZ / "data" / "capas"
 ORIGENES = ["Endémica", "Nativa", "Introducida", "Sin dato"]
 AMENAZA = {"CR", "EN", "VU"}
 
@@ -50,6 +53,14 @@ CATEGORIAS = {"CR": "🔴 CR · En peligro crítico", "EN": "🟠 EN · En pelig
               "NT": "🟢 NT · Casi amenazada", "LC": "🔵 LC · Preocupación menor",
               "DD": "⚪ DD · Datos insuficientes", "NE": "⚫ NE · No evaluada"}
 FUENTES = {"GBIF": "🌐 GBIF", "Unergy": "🌳 Unergy"}
+METRICAS = {
+    "Rarefactada": "Especies esperadas si todas las unidades tuvieran el mismo número de registros "
+                   "(el mínimo de registros de Opciones avanzadas). Corrige la diferencia de muestreo entre unidades.",
+    "Chao1": "Riqueza estimada: suma las especies que probablemente están pero no se han registrado, "
+             "a partir de las especies con uno y dos registros.",
+    "Observada": "Número de especies registradas, sin corrección. Favorece las zonas más muestreadas.",
+}
+UMBRAL_VACIO = 0.10  # hotspot con menos de este % de área en capas de conservación = vacío
 
 # ---- Colores (editar aquí) -----------------------------------------------
 # Degradado de menos a más especies. Pon los códigos hex que quieras, de claro a oscuro.
@@ -58,6 +69,7 @@ PURPLE, PURPLE_DARK, PURPLE_MID, PURPLE_LIGHT = "#7B4CC9", "#2D1B4E", "#9B6FE8",
 # Mapa: verde (menos especies) -> amarillo -> rojo (más especies)
 PALETA_HEX = ["#1A9850", "#66BD63", "#A6D96A", "#FEE08B", "#FDAE61", "#F46D43", "#D73027"]
 COLOR_HOTSPOT_HEX = "#2D1B4E"   # borde de los hotspots (morado Unergy)
+COLOR_CAPAS_HEX = "#1F5FA8"     # áreas protegidas y otras capas de conservación
 # --------------------------------------------------------------------------
 
 
@@ -68,6 +80,7 @@ def hex_a_rgb(h):
 
 PALETA = np.array([hex_a_rgb(h) for h in PALETA_HEX])
 COLOR_HOTSPOT = hex_a_rgb(COLOR_HOTSPOT_HEX)
+COLOR_CAPAS = hex_a_rgb(COLOR_CAPAS_HEX)
 
 st.markdown(f"""
 <style>
@@ -86,7 +99,7 @@ st.markdown(f"""
   .stTabs [data-baseweb="tab"]:hover {{ background: rgba(123,76,201,0.12) !important; }}
   .stTabs [aria-selected="true"] {{ background: {PURPLE} !important; }}
   .stTabs [aria-selected="true"] p {{ color: #FFFFFF !important; }}
-  .metric-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 6px 0 14px; }}
+  .metric-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin: 6px 0 14px; }}
   .metric-card {{ background: #FFFFFF; border: 2px solid {PURPLE_LIGHT}; border-left: 5px solid {PURPLE};
     border-radius: 10px; padding: 12px 18px; box-shadow: 0 1px 4px rgba(123,76,201,0.08); }}
   .metric-card .label {{ font-size: 0.8rem; color: #5A5A72; font-weight: 700; margin-bottom: 4px; }}
@@ -188,6 +201,34 @@ def firma_listas():
     return tuple((p.name, p.stat().st_mtime) for p in sorted(CARPETA_LISTAS.glob("*.csv")))
 
 
+def firma_capas(depto):
+    carpeta = CARPETA_CAPAS / depto
+    if not carpeta.exists():
+        return ()
+    return tuple((p.name, p.stat().st_mtime) for p in sorted(carpeta.glob("*.geojson")))
+
+
+@st.cache_resource
+def cargar_capas(depto, firma):
+    """{nombre de capa: [(geometría, propiedades), ...]} desde data/capas/<depto>/."""
+    capas = {}
+    for nombre, _ in firma:
+        datos = json.loads((CARPETA_CAPAS / depto / nombre).read_text(encoding="utf-8"))
+        capas[Path(nombre).stem] = [(shape(f["geometry"]), f.get("properties") or {})
+                                    for f in datos["features"] if f.get("geometry")]
+    return capas
+
+
+@st.cache_resource
+def union_capas(depto, seleccion, firma):
+    """Unión de las capas elegidas (None si no hay ninguna)."""
+    if not seleccion:
+        return None
+    capas = cargar_capas(depto, firma)
+    union = unary_union([g for n in seleccion for g, _ in capas.get(n, [])])
+    return None if union.is_empty else union
+
+
 @st.cache_data
 def preparar(depto, firma, firma_l):
     """firma y firma_l cambian cuando cambian los Excel o las listas, para recalcular."""
@@ -233,13 +274,52 @@ def preparar(depto, firma, firma_l):
 
 
 # ================================================================ cálculo
-def clasificar(tabla, umbral, pct_hotspot):
-    """Agrega nivel y color según el percentil de riqueza entre unidades con datos suficientes."""
+_lgamma = np.vectorize(math.lgamma)
+
+
+def _ln_comb(a, m):
+    return _lgamma(a + 1) - math.lgamma(m + 1) - _lgamma(a - m + 1)
+
+
+def riqueza(ni, m):
+    """Indicadores de una unidad a partir de los registros por especie (ni).
+
+    rarefactada: especies esperadas en m registros (Hurlbert 1971); NaN si hay menos de m.
+    chao1: riqueza estimada con corrección de sesgo (Chao 1987).
+    cobertura: proporción de la comunidad representada en la muestra (Chao y Jost 2012).
+    """
+    ni = np.asarray(ni, dtype=float)
+    n, s = ni.sum(), len(ni)
+    f1, f2 = (ni == 1).sum(), (ni == 2).sum()
+    if n >= m:
+        resto = n - ni
+        prob = np.where(resto >= m, np.exp(_ln_comb(np.maximum(resto, m), m) - _ln_comb(np.array(n), m)), 0.0)
+        rare = float((1 - prob).sum())
+    else:
+        rare = np.nan
+    chao1 = s + f1 * (f1 - 1) / (2 * (f2 + 1))
+    if f1 == 0 or n <= 1:
+        cobertura = 1.0
+    else:
+        cobertura = 1 - f1 / n * ((n - 1) * f1 / ((n - 1) * f1 + 2 * f2))
+    return {"especies": s, "n": int(n), "Rarefactada": rare, "Chao1": chao1,
+            "Observada": float(s), "completitud": s / chao1 if chao1 else np.nan, "cobertura": cobertura}
+
+
+def riqueza_por_unidad(df, col, m):
+    conteos = df.groupby([col, "species"]).size()
+    filas = {u: riqueza(g.to_numpy(), m) for u, g in conteos.groupby(level=0)}
+    return pd.DataFrame.from_dict(filas, orient="index")
+
+
+def clasificar(tabla, umbral, pct_hotspot, metrica):
+    """Agrega nivel y color según el percentil de la métrica entre unidades con datos suficientes."""
     tabla = tabla.copy()
-    tabla["suficiente"] = tabla["n"] >= umbral
+    tabla["valor"] = tabla[metrica]
+    tabla["suficiente"] = (tabla["n"] >= umbral) & tabla["valor"].notna()
     ok = tabla["suficiente"]
     tabla["percentil"] = np.nan
-    tabla.loc[ok, "percentil"] = tabla.loc[ok, "especies"].rank(pct=True, method="max")
+    tabla.loc[ok, "percentil"] = tabla.loc[ok, "valor"].rank(pct=True, method="max")
 
     def nivel(p):
         if np.isnan(p):
@@ -254,25 +334,29 @@ def clasificar(tabla, umbral, pct_hotspot):
     t = (pos - i)[:, None]
     rgb = (PALETA[i] * (1 - t) + PALETA[i + 1] * t).astype(int)
     tabla["color"] = [[int(v) for v in c] + [ALFA] if s else GRIS for c, s in zip(rgb, ok)]
+    etiqueta = {"Rarefactada": f"Rarefactada a {umbral} registros", "Chao1": "Chao1", "Observada": "Observada"}[metrica]
+    tabla["valor_txt"] = [f"{etiqueta}: {v:,.1f}" if pd.notna(v) else f"{etiqueta}: sin dato" for v in tabla["valor"]]
+    completitud_txt = [f"<br/>Inventario {c:.0%} completo (Chao1)" if pd.notna(c) else "" for c in tabla["completitud"]]
+    tabla["detalle"] = [f"{int(e)} especies observadas<br/>{v}{c}<br/>{nv}" for e, v, c, nv
+                        in zip(tabla["especies"], tabla["valor_txt"], completitud_txt, tabla["nivel"])]
+    tabla["protegido"], tabla["vacio"] = np.nan, False
     return tabla
 
 
-def por_celda(df, res, umbral, pct):
+def por_celda(df, res, umbral, pct, metrica):
     col = f"h3_{res}"
-    t = (df.groupby(col).agg(especies=("species", "nunique"), n=("species", "size"),
-                             municipio=("municipio", lambda m: m.mode().iat[0] if m.notna().any() else "Fuera del límite"))
-           .reset_index().rename(columns={col: "h3"}))
+    mpio = df.groupby(col)["municipio"].agg(lambda m: m.mode().iat[0] if m.notna().any() else "Fuera del límite")
+    t = riqueza_por_unidad(df, col, umbral).join(mpio).rename_axis("h3").reset_index()
     t["nombre"] = t["municipio"]
-    return clasificar(t, umbral, pct)
+    return clasificar(t, umbral, pct, metrica)
 
 
-def por_municipio(df, depto, umbral, pct):
+def por_municipio(df, depto, umbral, pct, metrica):
     nombres, geoms, _ = cargar_municipios(depto)
-    t = (df.dropna(subset=["municipio"]).groupby("municipio")
-           .agg(especies=("species", "nunique"), n=("species", "size")))
-    t = t.reindex(nombres).fillna(0).reset_index().rename(columns={"index": "municipio"})
-    t["especies"] = t["especies"].astype(int)
-    t = clasificar(t, umbral, pct)
+    t = riqueza_por_unidad(df.dropna(subset=["municipio"]), "municipio", umbral).reindex(nombres)
+    t[["especies", "n"]] = t[["especies", "n"]].fillna(0).astype(int)
+    t = t.rename_axis("municipio").reset_index()
+    t = clasificar(t, umbral, pct, metrica)
     filas = []
     for (_, r), g in zip(t.iterrows(), geoms):
         for anillo in anillos(g):
@@ -280,7 +364,35 @@ def por_municipio(df, depto, umbral, pct):
     return t, pd.DataFrame(filas)
 
 
-# ================================================================ mapa
+def geometria_unidad(clave, unidad, depto):
+    if unidad == "Hexágonos":
+        return poligono_celda(clave)
+    nombres, geoms, _ = cargar_municipios(depto)
+    return dict(zip(nombres, geoms))[clave]
+
+
+def marcar_proteccion(tabla, unidad, depto, union):
+    """Fracción de cada hotspot dentro de las capas de conservación y si es vacío de conservación."""
+    if union is None:
+        return tabla
+    tabla = tabla.copy()
+    clave = "h3" if unidad == "Hexágonos" else "municipio"
+    es_hot = tabla["nivel"] == "Hotspot"
+    fr = []
+    for k in tabla.loc[es_hot, clave]:
+        g = geometria_unidad(k, unidad, depto)
+        fr.append(g.intersection(union).area / g.area if g.area else 0.0)
+    tabla.loc[es_hot, "protegido"] = fr
+    tabla["vacio"] = es_hot & (tabla["protegido"].fillna(1) < UMBRAL_VACIO)
+    return tabla
+
+
+def areas_que_cruzan(geom, capas, seleccion):
+    """Nombres de las áreas (de las capas elegidas) que tocan una geometría."""
+    return sorted({f"{p.get('nombre', 'Sin nombre')} ({n})" for n in seleccion
+                   for g, p in capas.get(n, []) if g.intersects(geom)})
+
+
 def capas_limites(depto, mostrar_nombres):
     nombres, geoms, contorno = cargar_municipios(depto)
     lineas_mpio = [{"path": a} for g in geoms for a in anillos(g)]
@@ -300,22 +412,27 @@ def capas_limites(depto, mostrar_nombres):
     return capas
 
 
-def dibujar_mapa(capas_datos, depto, mostrar_nombres, extra=None, alto=640):
-    _, _, contorno = cargar_municipios(depto)
-    minx, miny, maxx, maxy = contorno.bounds
-    vista = pdk.ViewState(latitude=(miny + maxy) / 2, longitude=(minx + maxx) / 2, zoom=7.1)
+def dibujar_mapa(capas_datos, depto, mostrar_nombres, extra=None, alto=640, vista=None):
+    if vista is None:
+        _, _, contorno = cargar_municipios(depto)
+        minx, miny, maxx, maxy = contorno.bounds
+        vista = pdk.ViewState(latitude=(miny + maxy) / 2, longitude=(minx + maxx) / 2, zoom=7.1)
     capas = capas_datos + capas_limites(depto, mostrar_nombres) + (extra or [])
-    tooltip = {"html": "<b>{nombre}</b><br/>{especies} especies<br/>{nivel}",
-               "style": {"fontSize": "12px"}}
+    tooltip = {"html": "<b>{nombre}</b><br/>{detalle}", "style": {"fontSize": "12px"}}
     st.pydeck_chart(pdk.Deck(layers=capas, initial_view_state=vista, tooltip=tooltip,
                              map_provider="carto", map_style="light_no_labels"),
                     width="stretch", height=alto)
 
 
-def capas_hex(celdas, resaltar):
+def hotspots_a_resaltar(tabla, solo_vacios):
+    hot = tabla[tabla["nivel"] == "Hotspot"]
+    return hot[hot["vacio"]] if solo_vacios else hot
+
+
+def capas_hex(celdas, resaltar, solo_vacios=False):
     capas = [pdk.Layer("H3HexagonLayer", data=celdas, get_hexagon="h3", get_fill_color="color",
                        stroked=False, extruded=False, pickable=True)]
-    hot = celdas[celdas["nivel"] == "Hotspot"]
+    hot = hotspots_a_resaltar(celdas, solo_vacios)
     if resaltar and len(hot):
         capas.append(pdk.Layer("H3HexagonLayer", data=hot, get_hexagon="h3", filled=False,
                                stroked=True, get_line_color=COLOR_HOTSPOT, line_width_min_pixels=2.5,
@@ -323,27 +440,40 @@ def capas_hex(celdas, resaltar):
     return capas
 
 
-def capas_mpio(poligonos, resaltar):
+def capas_mpio(poligonos, resaltar, solo_vacios=False):
     capas = [pdk.Layer("PolygonLayer", data=poligonos, get_polygon="poligono",
                        get_fill_color="color", stroked=False, pickable=True)]
-    hot = poligonos[poligonos["nivel"] == "Hotspot"]
+    hot = hotspots_a_resaltar(poligonos, solo_vacios)
     if resaltar and len(hot):
         capas.append(pdk.Layer("PolygonLayer", data=hot, get_polygon="poligono", filled=False,
                                stroked=True, get_line_color=COLOR_HOTSPOT, line_width_min_pixels=3))
     return capas
 
 
-def leyenda(pct, umbral):
+def capas_conservacion(capas, seleccion):
+    datos = [{"poligono": a} for n in seleccion for g, _ in capas.get(n, [])
+             for a in anillos(g) if g.geom_type in ("Polygon", "MultiPolygon")]
+    if not datos:
+        return []
+    return [pdk.Layer("PolygonLayer", data=datos, get_polygon="poligono", get_fill_color=COLOR_CAPAS + [35],
+                      get_line_color=COLOR_CAPAS + [230], stroked=True, line_width_min_pixels=1.8,
+                      pickable=False)]
+
+
+def leyenda(pct, umbral, metrica, con_capas=False):
     stops = ", ".join(f"rgb({r},{g},{b})" for r, g, b in PALETA)
+    capas_html = (f'<span style="margin-left:16px;display:inline-block;width:14px;height:14px;'
+                  f'background:rgba({",".join(map(str, COLOR_CAPAS))},.15);border:2px solid {COLOR_CAPAS_HEX}"></span>'
+                  "<span>Capas de conservación</span>") if con_capas else ""
     st.markdown(
         f"""<div style="display:flex;align-items:center;gap:12px;font-size:0.85rem;flex-wrap:wrap">
-        <span>Menos especies</span>
+        <span>Menor riqueza ({metrica.lower()})</span>
         <div style="width:220px;height:12px;border-radius:2px;background:linear-gradient(90deg,{stops})"></div>
-        <span>Más especies</span>
+        <span>Mayor riqueza</span>
         <span style="margin-left:16px;display:inline-block;width:14px;height:14px;border:2.5px solid {COLOR_HOTSPOT_HEX}"></span>
-        <span>Hotspot ({int(pct*100)} % con más especies)</span>
+        <span>Hotspot ({int(pct*100)} % con mayor riqueza)</span>
         <span style="margin-left:16px;display:inline-block;width:14px;height:14px;background:rgba(190,190,190,.5)"></span>
-        <span>Pocos datos (menos de {umbral} registros)</span></div>""",
+        <span>Pocos datos (menos de {umbral} registros)</span>{capas_html}</div>""",
         unsafe_allow_html=True)
     st.caption("El color es relativo dentro del departamento (percentil de riqueza). "
                "Las zonas sin color no tienen registros: es falta de muestreo, no ausencia de especies.")
@@ -354,8 +484,9 @@ def poligono_celda(celda):
     return Polygon([(lng, lat) for lat, lng in h3.cell_to_boundary(celda)])
 
 
-def hotspots_a_poligonos(tabla, datos, depto, unidad, res, unidos=True):
-    """Hotspots como polígonos (unidos si son vecinos) con especies, registros, área y municipios."""
+def hotspots_a_poligonos(tabla, datos, depto, unidad, res, unidos=True, proteccion=None, capas=None, seleccion=()):
+    """Hotspots como polígonos (unidos si son vecinos) con especies, registros, área, municipios
+    y, si hay capas de conservación, el % protegido y las áreas que cruza."""
     hot = tabla[tabla["nivel"] == "Hotspot"]
     if hot.empty:
         return []
@@ -374,22 +505,24 @@ def hotspots_a_poligonos(tabla, datos, depto, unidad, res, unidos=True):
                   for p in partes]
     else:
         partes = [(g, [k]) for k, g in unidades.items()]
-    a_metros = pyproj.Transformer.from_crs(4326, 9377, always_xy=True).transform
-
-    def area_km2(geom):
-        m = shapely.transform(geom, lambda c: np.column_stack(a_metros(c[:, 0], c[:, 1])))
-        return round(m.area / 1e6, 2)
-
     salida = []
     for geom, claves in partes:
         sub = datos[datos[col].isin(claves)]
+        area = a_plano(geom).area
+        if proteccion is not None:
+            prot = round(100 * a_plano(geom.intersection(proteccion)).area / area, 1) if area else 0.0
+            cruza = ", ".join(areas_que_cruzan(geom, capas, seleccion))
+        else:
+            prot, cruza = None, ""
         salida.append({
             "geom": orient(geom, 1.0) if geom.geom_type == "Polygon" else geom,
             "unidades": len(claves),
             "especies": int(sub["species"].nunique()),
             "registros": int(len(sub)),
-            "area_km2": area_km2(geom),
+            "area_km2": round(area / 1e6, 2),
             "municipios": ", ".join(sorted({str(mpio_de[k]) for k in claves if mpio_de.get(k)})),
+            "protegido_pct": prot,
+            "areas_protegidas": cruza,
         })
     salida.sort(key=lambda d: (-d["especies"], -d["area_km2"]))
     for i, d in enumerate(salida, 1):
@@ -418,7 +551,9 @@ def a_kmz(polis, titulo, descripcion):
         if len(partes) > 1:
             geometria = f"<MultiGeometry>{geometria}</MultiGeometry>"
         info = (f"<b>{escape(d['nombre'])}</b><br/>Especies: {d['especies']}<br/>Registros: {d['registros']}"
-                f"<br/>Área: {d['area_km2']} km²<br/>Municipios: {escape(d['municipios'])}")
+                f"<br/>Área: {d['area_km2']} km²<br/>Municipios: {escape(d['municipios'])}"
+                + (f"<br/>Área protegida: {d['protegido_pct']} %<br/>Cruza: {escape(d['areas_protegidas']) or 'ninguna'}"
+                   if d["protegido_pct"] is not None else ""))
         marcas.append(f"<Placemark><name>{escape(d['nombre'])}</name><description><![CDATA[{info}]]></description>"
                       f"<styleUrl>#hotspot</styleUrl>{geometria}</Placemark>")
     kml = ('<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
@@ -433,10 +568,116 @@ def a_kmz(polis, titulo, descripcion):
 
 def a_geojson(polis, descripcion):
     feats = [{"type": "Feature", "geometry": mapping(d["geom"]),
-              "properties": {k: d[k] for k in ("nombre", "unidades", "especies", "registros", "area_km2", "municipios")}}
+              "properties": {k: d[k] for k in ("nombre", "unidades", "especies", "registros", "area_km2", "municipios",
+                                               "protegido_pct", "areas_protegidas")}}
              for d in polis]
     return json.dumps({"type": "FeatureCollection", "name": "hotspots", "description": descripcion,
                        "features": feats}, ensure_ascii=False).encode("utf-8")
+
+
+# ================================================================ consulta por predio
+def capas_predio(predio, zona, sel):
+    color = np.where(sel["amenazada"].to_numpy()[:, None], [[215, 48, 39, 230]],
+                     np.where((sel["origen"] == "Endémica").to_numpy()[:, None], [[123, 76, 201, 230]],
+                              [[90, 90, 90, 160]]))
+    puntos = pd.DataFrame({
+        "lon": sel["lon"], "lat": sel["lat"], "color": color.tolist(), "nombre": sel["species"],
+        "detalle": [f"{g} · UICN {u if pd.notna(u) else 'NE'} · MADS {m if pd.notna(m) else '-'}"
+                    f"<br/>{f if pd.notna(f) else 'Sin fuente'} {int(a) if pd.notna(a) else ''}"
+                    for g, u, m, f, a in zip(sel["grupo"], sel["uicn"], sel["mads"], sel["fuente"], sel["year"])],
+    })
+    lineas = [{"path": a} for a in anillos(predio)] if predio.geom_type in ("Polygon", "MultiPolygon") else []
+    capas = [pdk.Layer("PolygonLayer", data=[{"poligono": a} for a in anillos(zona)], get_polygon="poligono",
+                       get_fill_color=[120, 170, 230, 30], get_line_color=[60, 120, 200, 200],
+                       stroked=True, line_width_min_pixels=1.5, pickable=False)]
+    if lineas:
+        capas.append(pdk.Layer("PathLayer", data=lineas, get_path="path", get_color=[0, 0, 0, 255],
+                               width_min_pixels=3, pickable=False))
+    capas.append(pdk.Layer("ScatterplotLayer", data=puntos, get_position=["lon", "lat"], get_fill_color="color",
+                           get_radius=40, radius_min_pixels=3.5, stroked=True, get_line_color=[255, 255, 255],
+                           line_width_min_pixels=0.6, pickable=True))
+    return capas
+
+
+def consultar_predio(predio, radio_km, datos, tabla, unidad, depto, capas, umbral, doi):
+    """Registros, especies, hotspot más cercano y áreas de conservación alrededor de un predio."""
+    predio_m = a_plano(predio)
+    radio_m = radio_km * 1000 if radio_km > 0 or predio_m.area > 0 else 100  # punto o línea sin radio
+    zona_m = predio_m.buffer(radio_m) if radio_m > 0 else predio_m
+    zona = a_wgs84(zona_m)
+    minx, miny, maxx, maxy = zona.bounds
+    cerca = datos[datos["lon"].between(minx, maxx) & datos["lat"].between(miny, maxy)]
+    sel = cerca[shapely.contains_xy(zona, cerca["lon"].to_numpy(), cerca["lat"].to_numpy())].copy()
+    sel["dist_km"] = shapely.distance(predio_m, a_plano(shapely.points(sel["lon"], sel["lat"]))) / 1000
+
+    sp = (sel.groupby("species")
+             .agg(Grupo=("grupo", "first"), Familia=("family", "first"), Origen=("origen", "first"),
+                  UICN=("uicn", "first"), MADS=("mads", "first"), Amenazada=("amenazada", "any"),
+                  Registros=("species", "size"), dist=("dist_km", "min"), ultimo=("year", "max"))
+             .reset_index()
+             .rename(columns={"species": "Especie", "dist": "Distancia al predio (km)", "ultimo": "Último registro"}))
+    sp["Distancia al predio (km)"] = sp["Distancia al predio (km)"].round(2)
+    sp = sp.sort_values(["Amenazada", "Origen", "Grupo", "Especie"], ascending=[False, True, True, True],
+                        key=lambda c: c.eq("Endémica") if c.name == "Origen" else c)
+    sp["iNaturalist"] = "https://www.inaturalist.org/taxa/search?q=" + sp["Especie"].str.replace(" ", "+")
+
+    hot = tabla[tabla["nivel"] == "Hotspot"]
+    if hot.empty:
+        dist_hot, hotspot_txt = None, "Sin hotspots"
+    else:
+        clave = "h3" if unidad == "Hexágonos" else "municipio"
+        union_hot = unary_union([geometria_unidad(k, unidad, depto) for k in hot[clave]])
+        dist_hot = predio_m.distance(a_plano(union_hot)) / 1000
+        hotspot_txt = "Dentro de un hotspot" if dist_hot == 0 else f"{dist_hot:,.1f} km"
+
+    filas = []
+    for nombre_capa, entidades in capas.items():
+        for g, prop in entidades:
+            if g.intersects(zona):
+                d = predio_m.distance(a_plano(g)) / 1000
+                filas.append({"Capa": nombre_capa, "Área": prop.get("nombre", "Sin nombre"),
+                              "Categoría": prop.get("categoria", ""), "Distancia al predio (km)": round(d, 2),
+                              "Relación": "Se traslapa con el predio" if d == 0 else "Dentro del radio"})
+    areas = pd.DataFrame(filas, columns=["Capa", "Área", "Categoría", "Distancia al predio (km)", "Relación"])
+    areas = areas.sort_values("Distancia al predio (km)")
+
+    # Texto de resumen
+    n_sp, amen = len(sp), sp[sp["Amenazada"]]
+    lista_amen = "; ".join(f"{r.Especie} ({', '.join(x for x in [f'UICN {r.UICN}' if r.UICN in AMENAZA else '', f'MADS {r.MADS}' if r.MADS in AMENAZA else ''] if x)})"
+                           for r in amen.head(12).itertuples())
+    if len(amen) > 12:
+        lista_amen += f" y {len(amen) - 12} más"
+    compl = riqueza(sel.groupby("species").size().to_numpy(), umbral)["completitud"] if len(sel) else np.nan
+    zona_txt = f"en un radio de {radio_km:g} km alrededor del predio" if radio_km > 0 else "dentro del predio"
+    partes = [f"{zona_txt[0].upper()}{zona_txt[1:]} hay {len(sel):,} registros de {n_sp:,} especies "
+              f"({', '.join(sorted(sel['grupo'].unique())) or 'ningún grupo'}), según GBIF (https://doi.org/{doi})"
+              f"{' e inventarios de Unergy' if (sel['fuente'] == 'Unergy').any() else ''}."]
+    if n_sp:
+        partes.append(f"De ellas, {len(amen)} están en alguna categoría de amenaza (Lista Roja UICN o "
+                      f"Res. 0126 de 2024 del MADS){': ' + lista_amen if len(amen) else ''}. "
+                      f"{int((sp['Origen'] == 'Endémica').sum())} son endémicas de Colombia.")
+    if dist_hot is not None:
+        partes.append("El predio se traslapa con un hotspot de biodiversidad del departamento." if dist_hot == 0
+                      else f"El hotspot de biodiversidad más cercano está a {dist_hot:,.1f} km.")
+    traslapes = areas[areas["Distancia al predio (km)"] == 0]
+    if len(traslapes):
+        partes.append("Se traslapa con: " + "; ".join(f"{r['Área']} ({r['Capa']})" for _, r in traslapes.iterrows()) + ".")
+    elif len(areas):
+        r = areas.iloc[0]
+        partes.append(f"No se traslapa con las capas de conservación; la más cercana es {r['Área']} "
+                      f"({r['Capa']}), a {r['Distancia al predio (km)']:,.1f} km.")
+    if pd.notna(compl):
+        partes.append(f"La completitud estimada del inventario en esta área es de {compl:.0%} (Chao1); "
+                      + ("la información secundaria es insuficiente y se recomienda caracterización en campo."
+                         if compl < 0.6 else "la información secundaria es razonablemente representativa."))
+    else:
+        partes.append("No hay registros suficientes para estimar la completitud; se recomienda caracterización en campo.")
+
+    dx, dy = maxx - minx, maxy - miny
+    vista = pdk.ViewState(latitude=(miny + maxy) / 2, longitude=(minx + maxx) / 2,
+                          zoom=float(np.clip(math.log2(360 / max(dx, dy, 1e-4)) - 0.6, 6, 15)))
+    return {"registros": sel, "especies": sp, "hotspot_txt": hotspot_txt, "areas": areas, "vista": vista,
+            "capas": capas_predio(predio, zona, sel), "resumen": " ".join(partes)}
 
 
 # ================================================================ barra lateral
@@ -454,6 +695,8 @@ with st.sidebar:
     if unidad == "Hexágonos":
         res = st.select_slider("Tamaño de hexágono", options=[5, 6, 7, 8], value=7,
                                format_func=lambda r: TAMANO_CELDA[r])
+    metrica = st.radio("Métrica de riqueza", list(METRICAS), horizontal=True, key="metrica",
+                       help=" ".join(f"{k}: {v}" for k, v in METRICAS.items()))
     st.markdown("**Grupos**")
     grupos_sel = st.pills("Grupos", ORDEN_GRUPOS, selection_mode="multi", default=ORDEN_GRUPOS,
                           format_func=lambda g: f"{ICONOS_GRUPO[g]} {g}", label_visibility="collapsed",
@@ -487,6 +730,20 @@ with st.sidebar:
     resaltar = st.checkbox("Resaltar hotspots", value=True)
     nombres_mpio = st.checkbox("Nombres de municipios", value=True)
 
+    firma_c = firma_capas(depto)
+    capas_disp = cargar_capas(depto, firma_c)
+    capas_sel, solo_vacios = [], False
+    if capas_disp:
+        st.markdown("**Capas de conservación**")
+        capas_sel = st.pills("Capas", list(capas_disp), selection_mode="multi", default=list(capas_disp),
+                             label_visibility="collapsed", key="pills_capas") or []
+        solo_vacios = st.checkbox("Resaltar solo vacíos de conservación", value=False, disabled=not capas_sel,
+                                  help=f"Hotspots con menos del {int(UMBRAL_VACIO*100)} % de su área dentro "
+                                       "de las capas elegidas.")
+    else:
+        st.caption("Capas de conservación: aún no hay. Corre pipeline/05_capas_conservacion.py.")
+    union_sel = union_capas(depto, tuple(capas_sel), firma_c)
+
     st.divider()
     st.subheader("Datos Unergy")
 
@@ -515,6 +772,7 @@ with st.sidebar:
 if not (CARPETA_LISTAS / f"origen_{depto}.csv").exists():
     st.sidebar.caption("Origen: aún sin datos. Corre pipeline/02_origen_especies.py.")
 df = df[df["grupo"].isin(grupos_sel) & df["origen"].isin(origen_sel) & df["fuente"].isin(fuentes_sel)]
+df_consulta = df  # la consulta por predio no aplica el filtro de amenaza
 if cats_sel:
     en_cat = pd.Series(False, index=df.index)
     if "UICN" in fuentes_am:
@@ -554,10 +812,17 @@ def capas_proyectos():
 
 def construir(datos):
     if unidad == "Hexágonos":
-        t = por_celda(datos, res, umbral, pct_hot)
-        return t, capas_hex(t, resaltar)
-    t, poligonos = por_municipio(datos, depto, umbral, pct_hot)
-    return t, capas_mpio(poligonos, resaltar)
+        t = marcar_proteccion(por_celda(datos, res, umbral, pct_hot, metrica), unidad, depto, union_sel)
+        return t, capas_hex(t, resaltar, solo_vacios)
+    t, poligonos = por_municipio(datos, depto, umbral, pct_hot, metrica)
+    t = marcar_proteccion(t, unidad, depto, union_sel)
+    poligonos = poligonos.drop(columns=["protegido", "vacio"]).merge(
+        t[["municipio", "protegido", "vacio"]], on="municipio", how="left")
+    return t, capas_mpio(poligonos, resaltar, solo_vacios)
+
+
+def capas_extra():
+    return capas_conservacion(capas_disp, capas_sel) + capas_proyectos()
 
 
 # ================================================================ página
@@ -574,23 +839,26 @@ def tarjetas(items):
                    for k, v in items)
     st.markdown(f'<div class="metric-grid">{html}</div>', unsafe_allow_html=True)
 
-tab_mapa, tab_tiempo, tab_detalle, tab_metodo = st.tabs(
-    ["Mapa de hotspots", "Multitemporal", "Municipios y especies", "Método"])
+tab_mapa, tab_consulta, tab_tiempo, tab_detalle, tab_metodo = st.tabs(
+    ["Mapa de hotspots", "Consulta por predio", "Multitemporal", "Municipios y especies", "Método"])
 
 with tab_mapa:
     tabla, capas = construir(df)
     hot = tabla[tabla["nivel"] == "Hotspot"]
     unidad_txt = "hexágonos" if unidad == "Hexágonos" else "municipios"
     mpios_hot = hot["municipio"].dropna().value_counts()
-    tarjetas([
+    items = [
         ("Especies registradas", f"{df['species'].nunique():,}"),
         (f"Hotspots ({unidad_txt})", f"{len(hot):,}"),
-        ("Municipio con más hotspots" if unidad == "Hexágonos" else "Municipio con más especies",
+        ("Municipio con más hotspots" if unidad == "Hexágonos" else "Municipio con mayor riqueza",
          mpios_hot.index[0] if len(mpios_hot) and unidad == "Hexágonos"
-         else tabla.sort_values("especies", ascending=False)["municipio"].iat[0]),
-    ])
-    dibujar_mapa(capas, depto, nombres_mpio, capas_proyectos())
-    leyenda(pct_hot, umbral)
+         else tabla.sort_values("valor", ascending=False)["municipio"].iat[0]),
+    ]
+    if union_sel is not None and len(hot):
+        items.append(("Hotspots sin protección", f"{int(hot['vacio'].sum())} de {len(hot)}"))
+    tarjetas(items)
+    dibujar_mapa(capas, depto, nombres_mpio, capas_extra())
+    leyenda(pct_hot, umbral, metrica, bool(capas_sel))
 
     st.markdown("#### Descargar hotspots")
     if hot.empty:
@@ -600,24 +868,80 @@ with tab_mapa:
                          key="forma_descarga",
                          help="Unidos: los hexágonos (o municipios) hotspot vecinos se funden en un solo "
                               "polígono. Separados: una geometría por hexágono o municipio.")
-        polis = hotspots_a_poligonos(tabla, df, depto, unidad, res, unidos=forma == "Polígonos unidos")
+        polis = hotspots_a_poligonos(tabla, df, depto, unidad, res, unidos=forma == "Polígonos unidos",
+                                     proteccion=union_sel, capas=capas_disp, seleccion=capas_sel)
         desc = (f"Hotspots de biodiversidad en {depto.title()} (Unergy). Unidad: {unidad.lower()}"
-                f"{'' if unidad == 'Municipios' else f', {TAMANO_CELDA[res]}'}; top {int(pct_hot*100)} % de riqueza. "
+                f"{'' if unidad == 'Municipios' else f', {TAMANO_CELDA[res]}'}; top {int(pct_hot*100)} % de riqueza "
+                f"({metrica.lower()}). "
                 f"Grupos: {', '.join(grupos_sel)}. Fuente: {', '.join(fuentes_sel)}. Origen: {', '.join(origen_sel)}. "
-                f"Amenaza: {', '.join(cats_sel) if cats_sel else 'todas'}.")
+                f"Amenaza: {', '.join(cats_sel) if cats_sel else 'todas'}."
+                + (f" Capas de conservación: {', '.join(capas_sel)}." if capas_sel else ""))
         base = f"hotspots_{depto}_{'hex' if unidad == 'Hexágonos' else 'municipios'}"
         st.caption(f"{len(polis)} polígono(s), {sum(p['area_km2'] for p in polis):,.1f} km² en total. "
                    "El KMZ abre en Google Earth; el GeoJSON, en QGIS o ArcGIS (desde ahí se exporta a shapefile).")
+        if union_sel is not None:
+            n_vacios = sum(p["protegido_pct"] < UMBRAL_VACIO * 100 for p in polis)
+            st.caption(f"{n_vacios} de {len(polis)} polígono(s) tienen menos del {int(UMBRAL_VACIO*100)} % de su "
+                       f"área en {', '.join(capas_sel)}: son vacíos de conservación, candidatos para nuevas "
+                       "figuras de protección o para orientar compensaciones.")
         c1, c2 = st.columns(2)
         c1.download_button("⬇ Descargar KMZ", a_kmz(polis, f"Hotspots {depto.title()}", desc),
                            file_name=f"{base}.kmz", mime="application/vnd.google-earth.kmz",
                            width="stretch")
         c2.download_button("⬇ Descargar GeoJSON", a_geojson(polis, desc),
                            file_name=f"{base}.geojson", mime="application/geo+json", width="stretch")
-        st.dataframe(pd.DataFrame([{k: d[k] for k in ("nombre", "especies", "registros", "unidades", "area_km2", "municipios")}
-                                   for d in polis]).rename(columns={"nombre": "Hotspot", "especies": "Especies",
-                                   "registros": "Registros", "unidades": "Unidades", "area_km2": "Área (km²)",
-                                   "municipios": "Municipios"}), hide_index=True, width="stretch")
+        columnas = {"nombre": "Hotspot", "especies": "Especies", "registros": "Registros", "unidades": "Unidades",
+                    "area_km2": "Área (km²)", "municipios": "Municipios"}
+        if union_sel is not None:
+            columnas |= {"protegido_pct": "% protegido", "areas_protegidas": "Áreas que cruza"}
+        st.dataframe(pd.DataFrame([{k: d[k] for k in columnas} for d in polis]).rename(columns=columnas),
+                     hide_index=True, width="stretch")
+
+with tab_consulta:
+    st.write("Sube el polígono de un predio, proyecto o trámite para ver qué se ha registrado alrededor, "
+             "cuáles especies están amenazadas o son endémicas, qué tan cerca está de un hotspot y qué "
+             "áreas de conservación toca.")
+    c1, c2 = st.columns([2, 1])
+    archivo_predio = c1.file_uploader("Predio o área de interés", type=FORMATOS, key="archivo_predio",
+                                      help="KMZ, KML, GeoJSON o shapefile en .zip (con .shp, .shx, .dbf y .prj).")
+    radio_km = c2.slider("Radio de búsqueda (km)", 0.0, 20.0, 5.0, 0.5,
+                         help="Distancia alrededor del predio en la que se buscan registros.")
+    st.caption("Usa los filtros de grupos, fuente y origen de la barra lateral (no el de amenaza). "
+               "La distancia al hotspot usa el mapa con todos sus filtros.")
+    predio = None
+    if archivo_predio is not None:
+        try:
+            predio = unary_union([g for g, _ in leer_vector(archivo_predio.getvalue(), archivo_predio.name)])
+        except Exception as e:  # el archivo lo sube el usuario: cualquier error de lectura se le muestra
+            st.error(f"No pude leer el archivo: {e}")
+    if predio is None:
+        st.info("Esperando el archivo del predio.")
+    else:
+        consulta = consultar_predio(predio, radio_km, df_consulta, tabla, unidad, depto, capas_disp, umbral, doi)
+        sel, sp = consulta["registros"], consulta["especies"]
+        tarjetas([
+            ("Especies registradas", f"{sp['Especie'].nunique():,}"),
+            ("Amenazadas (UICN o MADS)", f"{int(sp['Amenazada'].sum()):,}"),
+            ("Endémicas", f"{int((sp['Origen'] == 'Endémica').sum()):,}"),
+            ("Hotspot más cercano", consulta["hotspot_txt"]),
+        ])
+        if len(sel) < umbral:
+            st.warning(f"Solo hay {len(sel)} registros en el área de consulta. Esto indica falta de muestreo, "
+                       "no baja biodiversidad: conviene caracterizar en campo.")
+        dibujar_mapa(capas, depto, False, capas_extra() + consulta["capas"], alto=520, vista=consulta["vista"])
+        st.caption("Puntos: 🔴 amenazada · 🟣 endémica · ⚪ otras. Línea negra: predio; azul claro: radio de búsqueda.")
+
+        st.markdown("#### Resumen")
+        st.text_area("Texto para el informe o concepto técnico", consulta["resumen"], height=170,
+                     key="resumen_predio")
+        if not consulta["areas"].empty:
+            st.markdown("#### Áreas de conservación cercanas")
+            st.dataframe(consulta["areas"], hide_index=True, width="stretch")
+        st.markdown("#### Especies registradas")
+        st.dataframe(sp, hide_index=True, width="stretch",
+                     column_config={"iNaturalist": st.column_config.LinkColumn(display_text="ver")})
+        st.download_button("⬇ Descargar lista de especies (CSV)", sp.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"especies_{Path(archivo_predio.name).stem}.csv", mime="text/csv")
 
 with tab_tiempo:
     st.write("Compara cómo cambia el mapa según el periodo de los registros.")
@@ -625,24 +949,24 @@ with tab_tiempo:
     if anios.empty:
         st.info("Los registros seleccionados no tienen año (por ejemplo, los inventarios Unergy), "
                 "así que no se puede comparar por periodo. Activa también GBIF para ver esta pestaña.")
-        st.stop()
-    periodo = st.radio("Periodo", ["Antes de 2000", "2000 a 2014", "2015 en adelante", "Personalizado"],
-                       index=2, horizontal=True)
-    rangos = {"Antes de 2000": (int(anios.min()), 1999), "2000 a 2014": (2000, 2014),
-              "2015 en adelante": (2015, int(anios.max()))}
-    if periodo == "Personalizado":
-        rango = st.slider("Años", int(anios.min()), int(anios.max()), (2015, int(anios.max())))
     else:
-        rango = rangos[periodo]
-    sub = df[df["year"].between(*rango)]
-    if sub.empty:
-        st.info("No hay registros en ese periodo.")
-    else:
-        t_sub, capas_sub = construir(sub)
-        st.caption(f"{rango[0]} a {rango[1]}: {sub['species'].nunique():,} especies, "
-                   f"{(t_sub['nivel'] == 'Hotspot').sum()} hotspots.")
-        dibujar_mapa(capas_sub, depto, nombres_mpio, capas_proyectos(), alto=560)
-        leyenda(pct_hot, umbral)
+        periodo = st.radio("Periodo", ["Antes de 2000", "2000 a 2014", "2015 en adelante", "Personalizado"],
+                           index=2, horizontal=True)
+        rangos = {"Antes de 2000": (int(anios.min()), 1999), "2000 a 2014": (2000, 2014),
+                  "2015 en adelante": (2015, int(anios.max()))}
+        if periodo == "Personalizado":
+            rango = st.slider("Años", int(anios.min()), int(anios.max()), (2015, int(anios.max())))
+        else:
+            rango = rangos[periodo]
+        sub = df[df["year"].between(*rango)]
+        if sub.empty:
+            st.info("No hay registros en ese periodo.")
+        else:
+            t_sub, capas_sub = construir(sub)
+            st.caption(f"{rango[0]} a {rango[1]}: {sub['species'].nunique():,} especies, "
+                       f"{(t_sub['nivel'] == 'Hotspot').sum()} hotspots.")
+            dibujar_mapa(capas_sub, depto, nombres_mpio, capas_extra(), alto=560)
+            leyenda(pct_hot, umbral, metrica, bool(capas_sel))
 
 with tab_detalle:
     st.subheader("Especies por municipio")
@@ -677,9 +1001,23 @@ with tab_detalle:
 
 with tab_metodo:
     st.markdown(f"""
-**Qué muestra el mapa.** La riqueza de especies registrada en cada unidad (hexágono o municipio).
-El color es el percentil dentro del departamento y los hotspots son el {int(pct_hot*100)} % de
-unidades con más especies, entre las que tienen al menos {umbral} registros.
+**Qué muestra el mapa.** La riqueza de especies de cada unidad (hexágono o municipio), con la
+métrica elegida. El color es el percentil dentro del departamento y los hotspots son el
+{int(pct_hot*100)} % de unidades con mayor riqueza, entre las que tienen al menos {umbral} registros.
+
+**Métricas de riqueza.** *Rarefactada*: especies esperadas en {umbral} registros, calculada para
+cada unidad (Hurlbert 1971); pone a todas las unidades en el mismo esfuerzo de muestreo y es la
+recomendada para comparar. *Chao1*: riqueza estimada a partir de las especies con uno y dos
+registros (Chao 1987). *Observada*: especies registradas, sin corrección. La completitud del
+inventario (observada / Chao1) aparece al pasar el cursor por cada unidad.
+
+**Capas de conservación.** Áreas protegidas (RUNAP) y otras figuras recortadas al departamento
+(pipeline/05_capas_conservacion.py). Un hotspot con menos del {int(UMBRAL_VACIO*100)} % de su
+área dentro de las capas elegidas se marca como vacío de conservación.
+
+**Consulta por predio.** Busca los registros dentro del radio elegido alrededor del polígono
+subido, la distancia de cada especie al predio, el hotspot más cercano y las áreas de
+conservación que toca. La distancia y el área se calculan en EPSG:9377.
 
 **Grupos.** Aves, mamíferos, herpetos (reptiles y anfibios), invertebrados (insectos,
 arácnidos y otros) y flora.
@@ -697,8 +1035,9 @@ unidos en polígonos o como unidades separadas. El área se calcula en MAGNA-SIR
 Origen Nacional (EPSG:9377).
 
 **Limitación.** La riqueza registrada depende de cuánto se ha muestreado: zonas con estudios
-ambientales o mucha observación de aves se ven más ricas. Por eso las unidades con pocos
-registros se muestran en gris y las vacías no se colorean.
+ambientales o mucha observación de aves se ven más ricas. La rarefacción reduce ese sesgo pero
+no lo elimina (una unidad con 10 registros de un solo grupo sigue siendo poco representativa).
+Por eso las unidades con pocos registros se muestran en gris y las vacías no se colorean.
 
 **Datos.** GBIF.org (18 November 2026) GBIF Occurrence Download
 https://doi.org/{meta.get('doi_gbif', '')}. Límites municipales: DANE, Marco Geoestadístico Nacional 2018.
