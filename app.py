@@ -72,7 +72,9 @@ PURPLE, PURPLE_DARK, PURPLE_MID, PURPLE_LIGHT = "#7B4CC9", "#2D1B4E", "#9B6FE8",
 # Mapa: verde (menos especies) -> amarillo -> rojo (más especies)
 PALETA_HEX = ["#1A9850", "#66BD63", "#A6D96A", "#FEE08B", "#FDAE61", "#F46D43", "#D73027"]
 COLOR_HOTSPOT_HEX = "#2D1B4E"   # borde de los hotspots (morado Unergy)
-COLOR_CAPAS_HEX = "#1F5FA8"     # áreas protegidas y otras capas de conservación
+COLOR_CAPAS_HEX = "#8D6E63"     # áreas protegidas y otras capas de conservación (café, para no confundir con el azul)
+COLOR_POCOS_HEX = "#74ADD1"     # registros insuficientes: azul, antes del verde de la escala
+COLOR_SIN_DATOS_HEX = "#C8C8C8"  # fondo del departamento: sin registros
 # --------------------------------------------------------------------------
 
 
@@ -136,7 +138,8 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-GRIS = [190, 190, 190, 70]
+GRIS = hex_a_rgb(COLOR_POCOS_HEX) + [190]  # se ve, pero no compite con la escala de riqueza
+FONDO_SIN_DATOS = hex_a_rgb(COLOR_SIN_DATOS_HEX) + [70]
 ALFA = 185
 
 
@@ -373,13 +376,20 @@ def clasificar(tabla, umbral, pct_hotspot, metrica, cob_min, por_grupo=False):
     etiqueta = {"Rarefactada": f"Rarefactada a {umbral} registros", "Chao1": "Chao1", "Observada": "Observada"}[metrica]
     # Tooltip: pydeck escapa el HTML de los valores, así que cada línea va en su propia columna
     tabla["l1"] = [f"{int(e)} especies observadas · {nv}" for e, nv in zip(tabla["especies"], tabla["nivel"])]
+    def motivo(n, cob):
+        if n < umbral:
+            minimo = f"{umbral} de un mismo grupo" if por_grupo else str(umbral)
+            return f"Muy pocos registros para comparar: tiene {int(n)}, se necesitan {minimo}"
+        return "Muestreo muy incompleto: casi cada registro es una especie distinta"
+
     if por_grupo:
-        tabla["l2"] = [f"Puntaje {v:.0f}/100 ({g})" if pd.notna(v) else "Ningún grupo con datos suficientes"
-                       for v, g in zip(tabla["valor"], tabla["grupos_txt"])]
+        tabla["l2"] = [f"Puntaje {v:.0f}/100 ({g})" if ok_ else motivo(n, c)
+                       for v, g, ok_, n, c in zip(tabla["valor"], tabla["grupos_txt"], ok, tabla["n"], tabla["cobertura"])]
     else:
-        tabla["l2"] = [f"{etiqueta}: {v:.1f}".replace(".", ",") if pd.notna(v) else f"{etiqueta}: sin dato"
-                       for v in tabla["valor"]]
-    tabla["l3"] = [f"Inventario {c:.0%} completo (Chao1)" if pd.notna(c) else "" for c in tabla["completitud"]]
+        tabla["l2"] = [f"{etiqueta}: {v:.1f}".replace(".", ",") if ok_ else motivo(n, c)
+                       for v, ok_, n, c in zip(tabla["valor"], ok, tabla["n"], tabla["cobertura"])]
+    tabla["l3"] = [f"Inventario {c:.0%} completo (Chao1)" if pd.notna(c) and n >= umbral else ""
+                   for c, n in zip(tabla["completitud"], tabla["n"])]
     tabla["protegido"], tabla["vacio"] = np.nan, False
     return tabla
 
@@ -470,11 +480,13 @@ TOOLTIP_ESTILO = {"backgroundColor": "#FFFFFF", "color": "#1A1A2E", "fontSize": 
 
 
 def dibujar_mapa(capas_datos, depto, mostrar_nombres, extra=None, alto=640, vista=None):
+    _, _, contorno = cargar_municipios(depto)
     if vista is None:
-        _, _, contorno = cargar_municipios(depto)
         minx, miny, maxx, maxy = contorno.bounds
         vista = pdk.ViewState(latitude=(miny + maxy) / 2, longitude=(minx + maxx) / 2, zoom=7.1)
-    capas = capas_datos + capas_limites(depto, mostrar_nombres) + (extra or [])
+    fondo = pdk.Layer("PolygonLayer", data=[{"poligono": a} for a in anillos(contorno)], get_polygon="poligono",
+                      get_fill_color=FONDO_SIN_DATOS, stroked=False, pickable=False)
+    capas = [fondo] + capas_datos + capas_limites(depto, mostrar_nombres) + (extra or [])
     tooltip = {"html": TOOLTIP_HTML, "style": TOOLTIP_ESTILO}
     st.pydeck_chart(pdk.Deck(layers=capas, initial_view_state=vista, tooltip=tooltip,
                              map_provider="carto", map_style="light_no_labels"),
@@ -524,16 +536,19 @@ def leyenda(pct, umbral, metrica, cob_min, con_capas=False):
                   "<span>Capas de conservación</span>") if con_capas else ""
     st.markdown(
         f"""<div style="display:flex;align-items:center;gap:12px;font-size:0.85rem;flex-wrap:wrap">
-        <span>Menor riqueza ({metrica.lower()})</span>
+        <span style="display:inline-block;width:34px;height:12px;border-radius:2px;background:{COLOR_POCOS_HEX}"></span>
+        <span>Pocos datos</span>
+        <span style="margin-left:8px">Menor riqueza ({metrica.lower()})</span>
         <div style="width:220px;height:12px;border-radius:2px;background:linear-gradient(90deg,{stops})"></div>
         <span>Mayor riqueza</span>
         <span style="margin-left:16px;display:inline-block;width:14px;height:14px;border:2.5px solid {COLOR_HOTSPOT_HEX}"></span>
         <span>Hotspot ({int(pct*100)} % con mayor riqueza)</span>
-        <span style="margin-left:16px;display:inline-block;width:14px;height:14px;background:rgba(190,190,190,.5)"></span>
-        <span>Pocos datos (menos de {umbral} registros o cobertura menor a {cob_min:.0%})</span>{capas_html}</div>""",
+        <span style="margin-left:16px;display:inline-block;width:14px;height:14px;background:rgba(200,200,200,.45);border:1px solid #999"></span>
+        <span>Sin registros</span>{capas_html}</div>""",
         unsafe_allow_html=True)
-    st.caption("El color es relativo dentro del departamento (percentil de riqueza). "
-               "Las zonas sin color no tienen registros: es falta de muestreo, no ausencia de especies.")
+    st.caption("El color es relativo dentro del departamento (percentil de riqueza). Azul: la zona tiene registros, "
+               f"pero menos de {umbral} o un muestreo muy incompleto (cobertura menor a {cob_min:.0%}), así que no se "
+               "compara. Gris: no hay registros; es falta de muestreo, no ausencia de especies.")
 
 
 # ================================================================ exportar hotspots
