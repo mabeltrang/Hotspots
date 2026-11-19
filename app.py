@@ -989,7 +989,9 @@ pred_sdm, met_sdm, info_sdm = cargar_sdm(depto, firma_sdm(depto))
 
 def especies_modeladas(con_amenaza=True):
     """Métricas de las especies válidas que cumplen los filtros de grupo, origen y (opcional) amenaza."""
-    m = met_sdm[met_sdm["valido"]].drop(columns="grupo").join(atributos, on="species", how="inner")
+    auc_min = st.session_state.get("auc_min_sdm", 0.7)
+    m = met_sdm[met_sdm["valido"] & (met_sdm["auc_espacial"] >= auc_min)].drop(columns="grupo")
+    m = m.join(atributos, on="species", how="inner")
     m = m[m["grupo"].isin(grupos_sel) & m["origen"].isin(origen_sel)]
     if con_amenaza and cats_sel:
         m = m[en_categorias(m)]
@@ -1151,14 +1153,17 @@ with tab_sdm:
                 "pipeline/gee_covariables.js (variables ambientales en Google Earth Engine) y "
                 "pipeline/06_modelos_distribucion.py; ver el README.")
     else:
+        st.slider("Confiabilidad mínima del modelo (AUC espacial)", 0.70, 0.95, 0.70, 0.05, key="auc_min_sdm",
+                  help="Subirlo deja solo las especies cuyos modelos predicen mejor zonas que no usaron para "
+                       "entrenar. 0,7 aceptable, 0,8 bueno, 0,9 excelente. También se aplica en la consulta por predio.")
         msel = especies_modeladas()
         st.write("Hábitat idóneo estimado con modelos de distribución de especies: dónde es probable que esté "
                  "cada especie según el clima, el relieve y la cobertura de bosque actual, aunque nadie la haya "
                  "registrado ahí.")
         st.caption(f"{info_sdm.get('especies_validas', len(met_sdm[met_sdm['valido']]))} de "
                    f"{info_sdm.get('especies_modeladas', len(met_sdm))} especies modeladas pasaron la validación "
-                   f"espacial (AUC ≥ {info_sdm.get('auc_min', 0.7)}); {len(msel)} cumplen los filtros de grupo, origen "
-                   f"y amenaza. Solo se modelan especies con al menos {info_sdm.get('min_celdas', 20)} localidades, "
+                   f"espacial (AUC ≥ {info_sdm.get('auc_min', 0.7)}); {len(msel)} cumplen la confiabilidad elegida y "
+                   f"los filtros de grupo, origen y amenaza. Solo se modelan especies con al menos {info_sdm.get('min_celdas', 20)} localidades, "
                    f"así que pesan más las comunes. Modelos del {info_sdm.get('fecha', 's.f.')}.")
         vista_sdm = st.radio("Ver", ["Riqueza modelada", "Una especie"], horizontal=True, key="vista_sdm")
         p = pred_sdm[pred_sdm["species"].isin(msel["species"])]

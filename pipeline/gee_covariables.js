@@ -9,8 +9,10 @@
 //   bio15  estacionalidad de la precipitación          WorldClim 1.4
 //   bio17  precipitación del trimestre más seco (mm)   WorldClim 1.4
 //   elevacion (m) y pendiente (°)                      SRTM 30 m
-//   cobertura_arborea  fracción de bosque en el km²    ESA WorldCover 2021 (clase 10)
-// La cobertura arbórea es la cobertura ACTUAL: el modelo no predice hábitat de bosque en potreros.
+//   cobertura_arborea, arbustal, herbazal, humedal, agua
+//          fracción de cada cobertura en el km²           ESA WorldCover 2021 (clases 10, 20, 30, 90, 80)
+// Las coberturas son las ACTUALES: el modelo no predice hábitat de bosque en potreros. La banda
+// "agua" no se usa como variable: sirve para quitar los hexágonos que son ciénaga o río.
 
 // ================== CONFIGURACIÓN (editar) ==================
 var DEPTO = 'Cesar';   // como aparece en FAO GAUL (ADM1_NAME)
@@ -28,15 +30,21 @@ var clima = ee.Image('WORLDCLIM/V1/BIO').select(['bio01', 'bio04', 'bio12', 'bio
 var dem = ee.Image('USGS/SRTMGL1_003');
 var elevacion = dem.rename('elevacion');
 var pendiente = ee.Terrain.slope(dem).rename('pendiente');
-var bosque = ee.ImageCollection('ESA/WorldCover/v200').first().eq(10)
-  .reduceResolution({reducer: ee.Reducer.mean(), maxPixels: 65535})
-  .reproject({crs: 'EPSG:4326', scale: ESCALA})
-  .rename('cobertura_arborea');
+var worldcover = ee.ImageCollection('ESA/WorldCover/v200').first();
+function fraccion(clase, nombre) {
+  return worldcover.eq(clase)
+    .reduceResolution({reducer: ee.Reducer.mean(), maxPixels: 65535})
+    .reproject({crs: 'EPSG:4326', scale: ESCALA})
+    .rename(nombre);
+}
+var coberturas = fraccion(10, 'cobertura_arborea').addBands(fraccion(20, 'arbustal'))
+  .addBands(fraccion(30, 'herbazal')).addBands(fraccion(90, 'humedal')).addBands(fraccion(80, 'agua'));
 
-var cov = clima.addBands(elevacion).addBands(pendiente).addBands(bosque).toFloat().clip(region);
+var cov = clima.addBands(elevacion).addBands(pendiente).addBands(coberturas).toFloat().clip(region);
 Map.centerObject(region, 8);
 Map.addLayer(cov.select('cobertura_arborea'), {min: 0, max: 1, palette: ['f5f0e1', '1b5e20']}, 'Cobertura arbórea');
-print('Bandas:', cov.bandNames());
+Map.addLayer(cov.select('agua'), {min: 0, max: 1, palette: ['ffffff', '0d47a1']}, 'Agua', false);
+print('Bandas (deben ser 12):', cov.bandNames());
 
 Export.image.toDrive({
   image: cov,

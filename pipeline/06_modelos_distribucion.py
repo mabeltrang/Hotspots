@@ -15,6 +15,8 @@ Método (presencia / fondo, equivalente a MaxEnt; Fithian y Hastie 2013, Renner 
     - Validación cruzada espacial por bloques (hexágonos H3 de resolución 4, ~1.770 km²).
       Se guardan solo las especies con AUC espacial >= AUC_MIN.
     - Umbral de presencia: percentil 10 de la idoneidad en las presencias de entrenamiento.
+    - Los hexágonos que son sobre todo agua (ciénagas, ríos) no se modelan: las especies
+      evaluadas son terrestres.
     - Sin extrapolar: los hexágonos con alguna variable fuera del rango de los hexágonos
       muestreados del grupo no se predicen (el modelo no sabe qué pasa en ambientes que no vio).
 
@@ -64,8 +66,11 @@ MIN_FONDO = 100        # hexágonos mínimos de fondo por grupo
 N_PLIEGUES = 4
 AUC_MIN = 0.70
 C_REGULARIZACION = 0.5  # menor = modelo más suave
-# Orden de las bandas que exporta pipeline/gee_covariables.js
-BANDAS_GEE = ["bio01", "bio04", "bio12", "bio15", "bio17", "elevacion", "pendiente", "cobertura_arborea"]
+# Orden de las bandas que exporta pipeline/gee_covariables.js (versión actual y la primera)
+BANDAS_GEE = {12: ["bio01", "bio04", "bio12", "bio15", "bio17", "elevacion", "pendiente", "cobertura_arborea",
+                   "arbustal", "herbazal", "humedal", "agua"],
+              8: ["bio01", "bio04", "bio12", "bio15", "bio17", "elevacion", "pendiente", "cobertura_arborea"]}
+UMBRAL_AGUA = 0.5      # hexágonos con más de la mitad de agua (ciénagas, ríos) no se modelan
 
 
 COLUMNAS = ["species", "grupo", "lat", "lon", f"h3_{RES}", "institutionCode"]
@@ -121,15 +126,19 @@ def covariables_por_celda(celdas, ruta_tif):
     with rasterio.open(ruta_tif) as r:
         if all(r.descriptions):
             nombres = list(r.descriptions)
-        elif r.count == len(BANDAS_GEE):  # el GeoTIFF de GEE no guarda los nombres de las bandas
-            nombres = BANDAS_GEE
+        elif r.count in BANDAS_GEE:  # el GeoTIFF de GEE no guarda los nombres de las bandas
+            nombres = BANDAS_GEE[r.count]
         else:
             nombres = [f"b{i}" for i in range(1, r.count + 1)]
         valores = np.array(list(r.sample([(lon, lat) for lat, lon in lat_lon])), dtype=float)
         if r.nodata is not None:
             valores[valores == r.nodata] = np.nan
-    x = pd.DataFrame(valores, index=celdas, columns=nombres)
-    return x.dropna()
+    x = pd.DataFrame(valores, index=celdas, columns=nombres).dropna()
+    if "agua" in x.columns:
+        n_agua = int((x["agua"] > UMBRAL_AGUA).sum())
+        print(f"{n_agua} hexágonos de agua (ciénagas, ríos) fuera del modelo")
+        x = x[x["agua"] <= UMBRAL_AGUA].drop(columns="agua")
+    return x
 
 
 def modelo():
