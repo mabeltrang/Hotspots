@@ -801,10 +801,6 @@ with st.sidebar:
                               help="UICN: Lista Roja global. MADS: Resolución 0126 de 2024.") or []
     else:
         fuentes_am = ["UICN", "MADS"]
-    pct_hot = st.slider("Qué % de unidades marcar como hotspot", 5, 25, 10, step=5,
-                        help="Con 10, se marca como hotspot el 10 % de las unidades con mayor riqueza "
-                             "(entre las que tienen datos suficientes). No es un número de especies: "
-                             "subirlo marca más zonas, bajarlo deja solo las más ricas.") / 100
     resaltar = st.checkbox("Resaltar hotspots", value=True)
     nombres_mpio = st.checkbox("Nombres de municipios", value=True)
 
@@ -835,6 +831,10 @@ with st.sidebar:
                             help="Proporción de la comunidad representada en los registros (Chao y Jost 2012). "
                                  "Las unidades por debajo se muestran en gris: tienen tan pocos registros "
                                  "repetidos que no se pueden comparar.")
+        pct_hot = st.slider("Qué % de unidades marcar como hotspot", 5, 25, 10, step=5, key="pct_hot",
+                            help="Con 10, se marca como hotspot el 10 % de las unidades con mayor riqueza "
+                                 "(entre las que tienen datos suficientes). No es un número de especies: "
+                                 "subirlo marca más zonas, bajarlo deja solo las más ricas.") / 100
         archivo_proy = st.file_uploader("Proyectos (CSV con nombre, lat, lon)", type="csv")
 
 df, meta, unergy, avisos = preparar(depto, firma, firma_listas())
