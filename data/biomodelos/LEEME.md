@@ -13,7 +13,8 @@ data/biomodelos/
 │   └── catalogo_modelos.csv    ← se regenera solo (no editar): parte técnica + metadatos
 └── procesados/    ← resultados (no editar)
     ├── vistas/MODELO_001.png               vista previa de todo el modelo
-    └── cesar/biomodelos_h3.parquet         presencia por hexágono H3 en el departamento
+    ├── colombia/biomodelos_h3.parquet      presencia por hexágono H3 en todo el país
+    └── cesar/biomodelos_h3.parquet         lo mismo, solo el departamento (para cruzar con registros)
 ```
 
 ## Cómo subir modelos (paso a paso en GitHub)
@@ -28,6 +29,9 @@ data/biomodelos/
    Al abrir la pestaña *BioModelos* aparece «Se incorporaron N modelo(s) nuevo(s)».
 6. Revisa la vista **Catálogo** de la pestaña: los que digan *Pendiente de identificación* se
    ven en el mapa pero no cuentan en la riqueza hasta que les pongas el nombre (ver abajo).
+
+**Extensiones.** `.tif`, `.tiff` y `.geotiff` son el mismo formato: se aceptan todos sin
+renombrar. Lo que importa es que traigan su georreferencia (la app la revisa al leerlos).
 
 Los siguientes modelos se suben igual: siempre a la misma carpeta `entrada/`. Los que ya
 estaban no se vuelven a procesar.
@@ -93,8 +97,10 @@ No borres ni cambies `id_modelo`, `huella` ni `archivo_original`: así se recono
 - **Otros sistemas de coordenadas y resoluciones.** Se aceptan: cada píxel se ubica por su centro
   en WGS84 y se asigna a su hexágono. Si el píxel es más grande que el hexágono de res. 7, el
   catálogo lo advierte (usar res. 5 o 6).
-- **Recorte al departamento.** Solo se procesan los píxeles cuyo centro cae dentro del departamento
-  (límites DANE). La vista previa conserva la extensión completa del modelo.
+- **Todo el país y el departamento.** Cada modelo se procesa dos veces: para todo Colombia (mapa
+  nacional de riqueza potencial) y para cada departamento con registros (cruce con registros y
+  consulta por predio). Solo cuentan los píxeles cuyo centro cae dentro de los límites DANE. La vista
+  previa conserva la extensión completa del modelo.
 - **Varios modelos de la misma especie.** Cuenta uno solo, el *principal*: el marcado con
   `usar_en_analisis = si`; si no hay, el validado, luego el de mayor nivel, mayor calificación y
   versión más reciente.

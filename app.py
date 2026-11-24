@@ -996,14 +996,43 @@ def preparar_biomodelos(depto, firma):
     firma cambia cuando cambian los archivos de entrada o los metadatos."""
     avisos = []
     try:
-        resumen = bm.actualizar(deptos=[depto], avisar=avisos.append)
+        resumen = bm.actualizar(deptos=[depto, bm.NACIONAL], avisar=avisos.append)
     except Exception as e:  # p. ej. sin permiso de escritura: se muestra lo que ya estaba procesado
         resumen = {"error": f"{type(e).__name__}: {e}"}
     cat, h = bm.cargar(depto)
-    return cat, h, resumen, avisos
+    _, h_pais = bm.cargar(bm.NACIONAL)
+    return cat, h, h_pais, resumen, avisos
 
 
-cat_bm, h_bm, resumen_bm, avisos_bm = preparar_biomodelos(depto, bm.firma_entrada())
+cat_bm, h_bm, h_pais_bm, resumen_bm, avisos_bm = preparar_biomodelos(depto, bm.firma_entrada())
+
+
+@st.cache_data
+def lineas_departamentos():
+    """Bordes simplificados de los departamentos, para el mapa nacional."""
+    lineas = []
+    for g in bm._limites().values():
+        for a in anillos(g.simplify(0.01)):
+            lineas.append({"path": [list(c) for c in a]})
+    return lineas
+
+
+@st.cache_data
+def departamento_de_celdas(celdas):
+    return dict(zip(celdas, bm.departamento_de_celdas(list(celdas))))
+
+
+def mapa_bm(capas, nacional, extra=None, alto=640, vista=None):
+    """Mapa de BioModelos: todo el país o el departamento elegido."""
+    if not nacional:
+        dibujar_mapa(capas, depto, nombres_mpio, (extra or []) + capas_extra(), alto=alto, vista=vista)
+        return
+    bordes = pdk.Layer("PathLayer", data=lineas_departamentos(), get_path="path", get_color=[60, 60, 60, 160],
+                       width_min_pixels=0.6, pickable=False)
+    vista = vista or pdk.ViewState(latitude=4.3, longitude=-73.3, zoom=5.0)
+    st.pydeck_chart(pdk.Deck(layers=capas + [bordes] + (extra or []), initial_view_state=vista,
+                             tooltip={"html": TOOLTIP_HTML, "style": TOOLTIP_ESTILO},
+                             map_provider="carto", map_style="light"), width="stretch", height=alto)
 MADS_TODAS = (pd.read_csv(CARPETA_LISTAS / "amenazadas_mads_0126.csv").drop_duplicates("species")
               .set_index("species")["categoria"] if (CARPETA_LISTAS / "amenazadas_mads_0126.csv").exists() else pd.Series(dtype=str))
 
@@ -1028,8 +1057,8 @@ def amenaza_bm(especies):
     return t.set_index("species")
 
 
-def presencias_bm(res_h3, cob, solo_validados=False, solo_amenazadas=False):
-    p = bm.presencias(cat_bm, h_bm, res_h3, cob)
+def presencias_bm(res_h3, cob, solo_validados=False, solo_amenazadas=False, h=None):
+    p = bm.presencias(cat_bm, h_bm if h is None else h, res_h3, cob)
     if solo_validados:
         val = cat_bm[es_validado(cat_bm["estado_validacion"])]["id_modelo"]
         p = p[p["id_modelo"].isin(val)]
@@ -1298,50 +1327,66 @@ with tab_bm:
             st.warning(f"{resumen_bm['errores']} archivo(s) no se pudieron leer; ver la columna «mensaje» del catálogo.")
         principales = cat_bm[cat_bm["modelo_principal"] == "Sí"]
         con_presencia = set(h_bm["id_modelo"]) if len(h_bm) else set()
+        en_pais = set(h_pais_bm["id_modelo"]) if len(h_pais_bm) else set()
         pendientes = cat_bm[cat_bm["estado_identificacion"] == bm.PENDIENTE]
         tarjetas([("Modelos en el catálogo", f"{len(cat_bm):,}"),
                   ("Especies en el análisis", f"{principales['nombre_cientifico'].nunique():,}"),
+                  ("Con distribución en Colombia", f"{principales['id_modelo'].isin(en_pais).sum():,}"),
                   (f"Con distribución en {depto.title()}", f"{principales['id_modelo'].isin(con_presencia).sum():,}"),
                   ("Validados por expertos", f"{es_validado(cat_bm['estado_validacion']).sum():,}"),
                   ("Pendientes de identificar", f"{len(pendientes):,}")])
         st.caption("Modelos de distribución de BioModelos (Instituto Humboldt): muestran dónde **podría** estar "
                    "cada especie, no dónde se ha confirmado. Solo cuentan en la riqueza los modelos con especie "
                    "identificada, y uno por especie (el «principal» del catálogo).")
-        vista_bm = st.radio("Ver", ["Riqueza potencial", "Un modelo", "Potencial vs. registros", "Catálogo"],
-                            horizontal=True, key="vista_bm")
+        ambito = st.radio("Ámbito", ["Colombia", depto.title()], horizontal=True, key="ambito_bm",
+                          help="Colombia: todo el país, solo con los modelos. Departamento: además permite "
+                               "cruzar con los registros biológicos.")
+        nacional = ambito == "Colombia"
+        h_tab, zona_txt = (h_pais_bm, "Colombia") if nacional else (h_bm, depto.title())
+        vistas_bm = ["Riqueza potencial", "Un modelo"] + ([] if nacional else ["Potencial vs. registros"]) + ["Catálogo"]
+        vista_bm = st.radio("Ver", vistas_bm, horizontal=True, key=f"vista_bm_{nacional}")
         if vista_bm != "Catálogo":
             c1, c2, c3 = st.columns([1.2, 1.5, 1.3])
-            res_bm = c1.select_slider("Tamaño de hexágono", options=[5, 6, 7], key="res_bm",
-                                      value=min(res, 7) if unidad == "Hexágonos" else 7,
-                                      format_func=lambda r: TAMANO_CELDA[r])
+            res_bm = c1.select_slider("Tamaño de hexágono", options=[5, 6, 7], key=f"res_bm_{nacional}",
+                                      value=5 if nacional else (min(res, 7) if unidad == "Hexágonos" else 7),
+                                      format_func=lambda r: TAMANO_CELDA[r],
+                                      help="En todo el país, ≈253 km² carga rápido; ≈5 km² puede tardar con muchos modelos.")
             cob_bm = c2.slider("Parte mínima del hexágono dentro de la distribución", 0, 100, 10, 5, key="cob_bm",
                                format="%d %%", help="Un hexágono cuenta para una especie si al menos este porcentaje "
                                                     "de su área está dentro del modelo. 0 = basta con que lo toque.") / 100
             solo_val = c3.checkbox("Solo modelos validados", key="solo_val_bm",
                                    help="Según la columna estado_validacion de los metadatos.")
             solo_am = c3.checkbox("Solo especies amenazadas", key="solo_am_bm", help="UICN o Res. 0126 de 2024 (CR, EN, VU).")
-            pres_bm = presencias_bm(res_bm, cob_bm, solo_val, solo_am)
+            pres_bm = presencias_bm(res_bm, cob_bm, solo_val, solo_am, h=h_tab)
 
         if vista_bm == "Riqueza potencial":
             if pres_bm.empty:
-                st.info(f"Ningún modelo en uso tiene distribución dentro de {depto.title()} con estos filtros.")
+                st.info(f"Ningún modelo en uso tiene distribución dentro de {zona_txt} con estos filtros.")
             else:
                 t = pres_bm.groupby("h3").agg(n=("species", "nunique"), lista=("species", lambda x: sorted(set(x)))).reset_index()
                 t["percentil"] = t["n"].rank(pct=True, method="max")
                 t["color"] = colores_escala(t["percentil"], [True] * len(t))
-                mpio = municipio_de_celdas(depto, tuple(t["h3"]))
-                t["nombre"] = t["h3"].map(mpio)
+                lugar = departamento_de_celdas(tuple(t["h3"])) if nacional else municipio_de_celdas(depto, tuple(t["h3"]))
+                t["nombre"] = t["h3"].map(lugar).replace("", "Fuera del límite")
                 t["l1"] = [f"{n} especie(s) con distribución potencial" for n in t["n"]]
-                t["l2"] = [", ".join(x[:4]) + (" …" if len(x) > 4 else "") for x in t["lista"]]
+                t["l2"] = [", ".join(x[:6]) + (f" y {len(x) - 6} más" if len(x) > 6 else "") for x in t["lista"]]
                 t["l3"], t["nivel"], t["vacio"] = "", "", False
                 tarjetas([("Especies en el mapa", f"{pres_bm['species'].nunique():,}"),
                           ("Máximo por hexágono", f"{t['n'].max():,}"),
                           ("Hexágonos con al menos una", f"{len(t):,}")])
-                dibujar_mapa(capas_hex(t.drop(columns="lista"), False), depto, nombres_mpio, capas_extra())
+                mapa_bm(capas_hex(t.drop(columns="lista"), False), nacional)
                 leyenda_sdm("Menos especies", "Más especies", False)
-                st.caption("Riqueza potencial = número de especies cuyo modelo de BioModelos cubre el hexágono. "
-                           "Es otra variable que la riqueza registrada del mapa principal: aquí no entra ningún registro. "
-                           "Con pocos modelos cargados, el mapa refleja solo esas especies.")
+                st.caption("Color: percentil de riqueza potencial entre los hexágonos con al menos una especie "
+                           "(verde = pocas, rojo = muchas). Riqueza potencial = número de especies cuyo modelo de "
+                           "BioModelos cubre el hexágono; aquí no entra ningún registro. Sin color = ninguno de los "
+                           "modelos cargados cubre esa zona, lo que no significa que no haya biodiversidad. "
+                           "Con pocos modelos, el mapa refleja solo esas especies.")
+                st.download_button("⬇ Descargar riqueza potencial por hexágono (CSV)",
+                                   t.assign(especies=t["lista"].map("; ".join))[["h3", "nombre", "n", "especies"]]
+                                   .rename(columns={"nombre": "departamento" if nacional else "municipio",
+                                                    "n": "riqueza_potencial"}).to_csv(index=False).encode("utf-8-sig"),
+                                   file_name=f"biomodelos_riqueza_{'colombia' if nacional else depto}_res{res_bm}.csv",
+                                   mime="text/csv")
 
         elif vista_bm == "Un modelo":
             opciones = cat_bm.sort_values(["estado_identificacion", "nombre_cientifico", "id_modelo"])
@@ -1356,16 +1401,16 @@ with tab_bm:
                 st.info(f"Este modelo no entra en la riqueza: {r['uso_en_analisis'][4:]}.")
             elif r["modelo_principal"] != "Sí":
                 st.info("Hay otro modelo de esta especie marcado como principal; este se muestra pero no se suma.")
-            hm = h_bm[(h_bm["id_modelo"] == id_sel) & (h_bm["res"] == res_bm)] if len(h_bm) else pd.DataFrame()
+            hm = h_tab[(h_tab["id_modelo"] == id_sel) & (h_tab["res"] == res_bm)] if len(h_tab) else pd.DataFrame()
             tarjetas([("Especie", especie or "Pendiente"),
                       ("Tipo de modelo", r["tipo_valores"] or "-"),
                       ("Validación", r["estado_validacion"] or "Sin dato"),
-                      (f"Hexágonos en {depto.title()}", f"{len(hm):,}")])
-            ver = st.radio("Mapa", [f"{depto.title()} (hexágonos)", "Extensión completa del modelo"],
-                           horizontal=True, key="mapa_modelo_bm")
-            if ver.startswith(depto.title()):
+                      (f"Hexágonos en {zona_txt}", f"{len(hm):,}")])
+            ver = st.radio("Mapa", [f"{zona_txt} (hexágonos)", "Extensión completa del modelo"],
+                           horizontal=True, key=f"mapa_modelo_bm_{nacional}")
+            if ver.startswith(zona_txt):
                 if hm.empty:
-                    st.info(f"El modelo no tiene distribución dentro de {depto.title()}"
+                    st.info(f"El modelo no tiene distribución dentro de {zona_txt}"
                             + (" (o es continuo sin umbral, o categórico)." if r["tipo_valores"] not in bm.BINARIOS else "."))
                 else:
                     continuo = r["tipo_valores"] in bm.CONTINUOS and "valor_medio" in hm and hm["valor_medio"].notna().any()
@@ -1383,7 +1428,7 @@ with tab_bm:
                                            get_fill_color=[20, 20, 20, 220], get_radius=60, radius_min_pixels=3, stroked=True,
                                            get_line_color=[255, 255, 255], line_width_min_pixels=0.8, pickable=True)]
                         st.caption(f"Puntos negros: {len(regs):,} registros de la especie en el departamento (todas las fuentes).")
-                    dibujar_mapa(capas_hex(hm, False), depto, nombres_mpio, capas_extra() + extra)
+                    mapa_bm(capas_hex(hm, False), nacional, extra)
                     leyenda_sdm("Valor bajo" if continuo else "Poca área del hexágono",
                                 "Valor alto" if continuo else "Todo el hexágono", False)
             else:
@@ -1395,8 +1440,8 @@ with tab_bm:
                     capa_img = pdk.Layer("BitmapLayer", image=pdk.types.String(img), bounds=[o, s_, e, n_], opacity=0.85)
                     vista_n = pdk.ViewState(latitude=(s_ + n_) / 2, longitude=(o + e) / 2,
                                             zoom=max(2.0, min(8.0, 9.3 - math.log2(max(e - o, n_ - s_, 0.1)))))
-                    dibujar_mapa([capa_img], depto, False, alto=560, vista=vista_n)
-                    st.caption("Morado: dentro de la distribución modelada. El recuadro gris es el departamento. "
+                    mapa_bm([capa_img], True, alto=560, vista=vista_n)
+                    st.caption("Morado: dentro de la distribución modelada. Líneas: departamentos. "
                                "Vista liviana (≈700 px de ancho): para detalle, abre el GeoTIFF original en QGIS.")
             with st.expander("Características técnicas y metadatos"):
                 campos = ["archivo_original", "ruta_entrada", "archivos_identicos", "nombre_cientifico", "estado_identificacion",

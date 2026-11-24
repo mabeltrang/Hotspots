@@ -114,8 +114,9 @@ Opcional, en el computador o en Colab: `python pipeline/08_biomodelos.py` hace l
 y muestra qué modelos faltan por identificar; luego se suben a GitHub las carpetas
 `data/biomodelos/catalogo/`, `metadata/` y `procesados/`.
 
-La pestaña muestra la riqueza potencial (especies cuyo modelo cubre cada hexágono), cada modelo por
-separado (en el departamento y en toda su extensión), el cruce entre riqueza potencial y registros
+La pestaña tiene dos ámbitos: **Colombia** (todo el país, con escala de color de verde = pocas
+especies a rojo = muchas) y el **departamento** elegido. Muestra la riqueza potencial (especies cuyo
+modelo cubre cada hexágono), cada modelo por separado (en el departamento y en toda su extensión), el cruce entre riqueza potencial y registros
 (vacíos de información) y el catálogo. La consulta por predio lista además las especies con
 distribución potencial en el área. Los modelos propios (*pipeline/06*) quedan como información
 exploratoria y, por defecto, se ocultan para las especies con modelo validado en BioModelos.

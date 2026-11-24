@@ -1,3 +1,7 @@
 ﻿id_modelo,huella,archivo_original,nombre_cientifico,familia,nivel_modelo,estado_validacion,calificacion_expertos,licencia,fuente,version_fecha,umbral,usar_en_analisis,taxid_biomodelos,id_modelo_biomodelos,cita,notas
 MODELO_001,7222909fcc62d8821be6183db19b2bea19b6e63b657fa54ac9b052b13f7ba62e,AE-9.geotiff,,,,,,,,,,,,,,
 MODELO_002,57b695259113790c995b963757fe34803c0aff4dfa3d6a5be923406e47196c06,BST-477.geotiff,,,,,,,,,,,,,,
+MODELO_003,248512edb0a26d83466962649d3e74a2cf6f8e85cf07cdbfa49521b5e129c0ba,Magnolia_caricaefragans_con.tif,,,,,,,,,,,,,,
+MODELO_004,29073259ba62519a99745e9ccff64527c7afcf14c49efbf2a477036b09cacc38,Magnolia_coronata_con.tif,,,,,,,,,,,,,,
+MODELO_005,603755f649da5b832ce6e64da12d2be185d773f9daa9848d245a69128b995979,Magnolia_espinalli_con.tif,,,,,,,,,,,,,,
+MODELO_006,24bf2d2c26000570e0e9f52ab9b242030282f51b4e67855f233d81b1b81f666d,Magnolia_katiorum_con.tif,,,,,,,,,,,,,,

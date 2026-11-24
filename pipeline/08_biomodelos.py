@@ -9,7 +9,7 @@ La app hace lo mismo sola cada vez que arranca y encuentra archivos nuevos; este
 para procesar en el computador o en Colab y subir los resultados ya listos.
 
 Correr desde la carpeta del repo:
-    python pipeline/08_biomodelos.py                 # todos los departamentos con datos
+    python pipeline/08_biomodelos.py                 # todo Colombia + departamentos con registros
     python pipeline/08_biomodelos.py --depto cesar   # solo uno
     python pipeline/08_biomodelos.py --forzar        # reprocesar todo (p. ej. tras reemplazar un archivo dañado)
 
@@ -17,7 +17,8 @@ Qué genera (ver data/biomodelos/LEEME.md):
     data/biomodelos/catalogo/catalogo_modelos.csv           catálogo completo (se regenera)
     data/biomodelos/metadata/metadatos_modelos.csv          una fila nueva por modelo; se llena a mano
     data/biomodelos/procesados/vistas/<ID>.png              vista previa nacional de cada modelo
-    data/biomodelos/procesados/<depto>/biomodelos_h3.parquet  presencia por hexágono H3 (res 5, 6, 7)
+    data/biomodelos/procesados/colombia/biomodelos_h3.parquet presencia por hexágono H3 en todo el país
+    data/biomodelos/procesados/<depto>/biomodelos_h3.parquet  lo mismo para cada departamento con registros
 """
 import argparse
 import os
@@ -29,7 +30,8 @@ import biomodelos as bm  # noqa: E402
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--depto", action="append", help="Departamento (se puede repetir). Por defecto, todos.")
+    p.add_argument("--depto", action="append",
+                   help="Departamento o 'colombia' (se puede repetir). Por defecto: Colombia y los departamentos con registros.")
     p.add_argument("--forzar", action="store_true", help="Reprocesar también los ya incorporados.")
     a = p.parse_args()
 

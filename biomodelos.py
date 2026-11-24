@@ -10,7 +10,8 @@ Carpetas (todas dentro de data/biomodelos/):
     metadata/    metadatos_modelos.csv: lo que se sabe de cada modelo (especie, nivel, validación...).
                  Lo llenas tú o, más adelante, la API de BioModelos. Es lo único que se edita a mano.
     catalogo/    catalogo_modelos.csv: se regenera solo; une la parte técnica con los metadatos.
-    procesados/  resultados: vistas/<ID>.png (mapa nacional) y <departamento>/biomodelos_h3.parquet.
+    procesados/  resultados: vistas/<ID>.png (vista previa), colombia/biomodelos_h3.parquet (todo el
+                 país) y <departamento>/biomodelos_h3.parquet (cada departamento con registros).
 
 Cada modelo se identifica por su contenido (huella SHA-256), no por el nombre del archivo: si el
 mismo GeoTIFF llega dos veces, o renombrado, o dentro de un ZIP, se procesa una sola vez.
@@ -249,15 +250,46 @@ def presencia_pixeles(banda, validos, tipo, umbral):
 
 
 # ============================================================ departamentos y H3
+NACIONAL = "colombia"   # ámbito nacional: todos los municipios del país
+
+
 @lru_cache(maxsize=None)
-def poligono_departamento(depto):
+def _limites():
+    """Polígonos de los departamentos (unión de sus municipios, DANE MGN 2018)."""
     from shapely.geometry import shape
     from shapely.ops import unary_union
 
     datos = json.loads(ARCHIVO_LIMITES.read_text(encoding="utf-8"))
-    geoms = [shape(f["geometry"]) for f in datos["features"]
-             if normalizar(f["properties"]["DPTO_CNMBR"]) == normalizar(depto)]
-    return unary_union(geoms) if geoms else None
+    por_depto = {}
+    for f in datos["features"]:
+        if f.get("geometry"):
+            por_depto.setdefault(f["properties"]["DPTO_CNMBR"], []).append(shape(f["geometry"]).buffer(0))
+    return {d: unary_union(g) for d, g in por_depto.items()}
+
+
+@lru_cache(maxsize=None)
+def poligono_departamento(depto):
+    """Polígono de un departamento, o de todo el país si depto es "colombia"."""
+    from shapely.ops import unary_union
+
+    deptos = _limites()
+    if normalizar(depto) in (NACIONAL, "todo el pais"):
+        return unary_union(list(deptos.values()))
+    geoms = [g for d, g in deptos.items() if normalizar(d) == normalizar(depto)]
+    return geoms[0] if geoms else None
+
+
+def departamento_de_celdas(celdas):
+    """Nombre del departamento que contiene el centro de cada hexágono ('' si cae fuera)."""
+    import shapely
+
+    if len(celdas) == 0:
+        return np.array([], dtype=object)
+    lat, lon = np.array([h3.cell_to_latlng(c) for c in celdas]).T
+    salida = np.full(len(celdas), "", dtype=object)
+    for d, g in _limites().items():
+        salida[shapely.contains_xy(g, lon, lat)] = d.title()
+    return salida
 
 
 @lru_cache(maxsize=32)
@@ -423,8 +455,10 @@ def unir_catalogo(tecnico, meta):
 
 
 def deptos_disponibles():
+    """Departamentos con registros en la app, más el ámbito nacional (todo Colombia)."""
     carpeta = RAIZ / "data" / "procesados"
-    return sorted(p.name for p in carpeta.iterdir() if (p / "registros.parquet").exists()) if carpeta.exists() else []
+    deptos = sorted(p.name for p in carpeta.iterdir() if (p / "registros.parquet").exists()) if carpeta.exists() else []
+    return deptos + [NACIONAL]
 
 
 def actualizar(deptos=None, forzar=False, avisar=print):
@@ -486,6 +520,7 @@ def actualizar(deptos=None, forzar=False, avisar=print):
             resumen["nuevos"] += 1
         id_m = tecnico.at[i, "id_modelo"]
         avisar(f"{id_m}: {item['ruta_entrada']}")
+        previo_msj = tecnico.at[i, "mensaje"] if hechos else ""   # mensajes de otros ámbitos ya hechos
         try:
             info = inspeccionar(item["gdal"])
             for k, v in info.items():
@@ -509,7 +544,6 @@ def actualizar(deptos=None, forzar=False, avisar=print):
             tecnico.at[i, "deptos_procesados"] = "|".join(sorted(hechos | set(procesar)))
             tecnico.at[i, "version_proceso"] = VERSION_PROCESO
             tecnico.at[i, "estado_procesamiento"] = "Procesado"
-            previo_msj = tecnico.at[i, "mensaje"] if hechos else ""
             tecnico.at[i, "mensaje"] = " ".join(dict.fromkeys(filter(None, [previo_msj] + mensajes)))
         except Exception as e:  # un archivo malo no detiene la carga de los demás
             tecnico.at[i, "estado_procesamiento"] = "Error"
