@@ -1325,16 +1325,32 @@ with tab_bm:
             st.success(f"Se incorporaron {resumen_bm['nuevos']} modelo(s) nuevo(s).")
         if resumen_bm.get("errores"):
             st.warning(f"{resumen_bm['errores']} archivo(s) no se pudieron leer; ver la columna «mensaje» del catálogo.")
-        principales = cat_bm[cat_bm["modelo_principal"] == "Sí"]
-        con_presencia = set(h_bm["id_modelo"]) if len(h_bm) else set()
-        en_pais = set(h_pais_bm["id_modelo"]) if len(h_pais_bm) else set()
-        pendientes = cat_bm[cat_bm["estado_identificacion"] == bm.PENDIENTE]
-        tarjetas([("Modelos en el catálogo", f"{len(cat_bm):,}"),
-                  ("Especies en el análisis", f"{principales['nombre_cientifico'].nunique():,}"),
-                  ("Con distribución en Colombia", f"{principales['id_modelo'].isin(en_pais).sum():,}"),
-                  (f"Con distribución en {depto.title()}", f"{principales['id_modelo'].isin(con_presencia).sum():,}"),
-                  ("Validados por expertos", f"{es_validado(cat_bm['estado_validacion']).sum():,}"),
-                  ("Pendientes de identificar", f"{len(pendientes):,}")])
+        cnt = bm.conteos(cat_bm, h_pais_bm, h_bm)
+        st.markdown("**Modelos (archivos)**")
+        tarjetas([("Modelos en el catálogo", f"{cnt['modelos']:,}"),
+                  ("Pendientes de identificar", f"{cnt['pendientes']:,}"),
+                  ("Adicionales de una especie ya contada", f"{cnt['adicionales']:,}"),
+                  ("Identificados que no entran", f"{cnt['no_usables']:,}")])
+        st.markdown("**Especies (nombres científicos únicos)**")
+        tarjetas([("Especies en el análisis", f"{cnt['especies_analisis']:,}"),
+                  ("Con distribución en Colombia", f"{len(cnt['especies_pais']):,}"),
+                  (f"Con distribución en {depto.title()}", f"{len(cnt['especies_depto']):,}"),
+                  ("Validadas por expertos", f"{len(cnt['especies_validadas']):,}")])
+        partes = [(cnt["especies_analisis"], "especies en el análisis (1 modelo principal c/u)", "#7B4CC9"),
+                  (cnt["adicionales"], "modelos adicionales de especies ya contadas", "#B8A9E0"),
+                  (cnt["no_usables"], "identificados que no entran", "#FDAE61"),
+                  (cnt["pendientes"], "pendientes de identificar", "#C8C8C8")]
+        barra = "".join(f'<div title="{n} {t}" style="flex:{n};background:{c};color:#1A1A2E;font-size:0.75rem;'
+                        f'font-weight:700;text-align:center;padding:3px 0">{n}</div>' for n, t, c in partes if n)
+        st.markdown(f'<div style="display:flex;border-radius:6px;overflow:hidden;border:1px solid #B8A9E0;'
+                    f'margin:4px 0 2px">{barra}</div><div style="font-size:0.8rem;color:#5A5A72">'
+                    f'{cnt["modelos"]} modelos = ' + " + ".join(f"{n} {t}" for n, t, _ in partes) + "</div>",
+                    unsafe_allow_html=True)
+        if not cnt["cuadra"]:
+            st.error("Las cifras de modelos y especies no cuadran con el catálogo; revisa la vista Catálogo.")
+        if cnt["especies_sin_modelo_usable"]:
+            st.caption("Especies identificadas sin ningún modelo utilizable (no entran en la riqueza): "
+                       + ", ".join(cnt["especies_sin_modelo_usable"]) + ".")
         st.caption("Modelos de distribución de BioModelos (Instituto Humboldt): muestran dónde **podría** estar "
                    "cada especie, no dónde se ha confirmado. Solo cuentan en la riqueza los modelos con especie "
                    "identificada, y uno por especie (el «principal» del catálogo).")
@@ -1371,6 +1387,12 @@ with tab_bm:
                 t["l1"] = [f"{n} especie(s) con distribución potencial" for n in t["n"]]
                 t["l2"] = [", ".join(x[:6]) + (f" y {len(x) - 6} más" if len(x) > 6 else "") for x in t["lista"]]
                 t["l3"], t["nivel"], t["vacio"] = "", "", False
+                en_zona = cnt["especies_pais"] if nacional else cnt["especies_depto"]
+                fuera = sorted(en_zona - set(pres_bm["species"]))
+                st.caption(f"El mapa usa {pres_bm['species'].nunique()} de las {len(en_zona)} especies con distribución en "
+                           f"{zona_txt}, una vez cada una (modelo principal)"
+                           + (f". No aparecen por los filtros o por cubrir menos del {cob_bm:.0%} de cada hexágono: "
+                              + ", ".join(fuera) if fuera else "") + ".")
                 tarjetas([("Especies en el mapa", f"{pres_bm['species'].nunique():,}"),
                           ("Máximo por hexágono", f"{t['n'].max():,}"),
                           ("Hexágonos con al menos una", f"{len(t):,}")])
@@ -1515,6 +1537,11 @@ with tab_bm:
                                    file_name=f"biomodelos_potencial_vs_registros_{depto}_res{res_bm}.csv", mime="text/csv")
 
         else:  # Catálogo
+            st.markdown("#### Modelos y especies")
+            st.caption("Una fila por modelo (archivo). Varias filas pueden ser de la misma especie; solo la marcada "
+                       "como principal se suma en la riqueza.")
+            st.dataframe(bm.tabla_modelos_especies(cat_bm), hide_index=True, width="stretch")
+            st.markdown("#### Catálogo técnico")
             cols = ["id_modelo", "nombre_cientifico", "estado_identificacion", "archivo_original", "tipo_valores",
                     "estado_validacion", "nivel_modelo", "calificacion_expertos", "licencia", "uso_en_analisis",
                     "modelo_principal", "estado_procesamiento", "mensaje"]

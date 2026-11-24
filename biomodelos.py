@@ -605,3 +605,59 @@ def presencias(cat, h, res, cobertura_min):
     p = p[p["fraccion"] >= cobertura_min] if cobertura_min > 0 else p
     return p.merge(princ, on="id_modelo").rename(columns={"nombre_cientifico": "species"})[
         ["h3", "species", "id_modelo", "fraccion"]]
+
+
+def conteos(cat, h_pais, h_depto):
+    """Indicadores de la pestaña BioModelos, separando modelos (archivos) de especies.
+
+    Modelos: cada archivo del catálogo. Especies: nombres científicos únicos. La riqueza usa una
+    sola vez cada especie, con su modelo principal. Devuelve también una verificación de que las
+    partes suman el total (si no suman, hay un error de lógica, no de datos).
+    """
+    pend = cat[cat["estado_identificacion"] == PENDIENTE]
+    ident = cat[cat["estado_identificacion"] != PENDIENTE]
+    princ = cat[cat["modelo_principal"] == "Sí"]
+    adicionales = ident[(ident["uso_en_analisis"] == "Sí") & (ident["modelo_principal"] != "Sí")]
+    no_usables = ident[ident["uso_en_analisis"] != "Sí"]
+    nombre_principal = dict(zip(princ["id_modelo"], princ["nombre_cientifico"]))
+
+    def especies_con_distribucion(h):
+        if h is None or h.empty or "fraccion" not in h.columns:
+            return set()
+        ids = set(h.loc[h["fraccion"].fillna(0) > 0, "id_modelo"]) & set(nombre_principal)
+        return {nombre_principal[i] for i in ids}
+
+    validado = princ["estado_validacion"].map(normalizar)
+    validadas = set(princ.loc[validado.str.contains("valid") & ~validado.str.contains("no valid|sin valid"),
+                              "nombre_cientifico"])
+    r = {
+        "modelos": len(cat), "pendientes": len(pend), "identificados": len(ident),
+        "adicionales": len(adicionales), "no_usables": len(no_usables),
+        "especies_identificadas": ident["nombre_cientifico"].nunique(),
+        "especies_analisis": princ["nombre_cientifico"].nunique(),
+        "especies_sin_modelo_usable": sorted(set(ident["nombre_cientifico"]) - set(princ["nombre_cientifico"])),
+        "especies_pais": especies_con_distribucion(h_pais),
+        "especies_depto": especies_con_distribucion(h_depto),
+        "especies_validadas": validadas,
+    }
+    r["cuadra"] = (r["modelos"] == r["pendientes"] + r["identificados"]
+                   and r["identificados"] == len(princ) + r["adicionales"] + r["no_usables"]
+                   and len(princ) == r["especies_analisis"])
+    return r
+
+
+def tabla_modelos_especies(cat):
+    """Modelo → especie → estado → principal, desde el catálogo real."""
+    motivo = np.where(cat["modelo_principal"] == "Sí", "Se usa en la riqueza",
+                      np.where(cat["uso_en_analisis"] == "Sí", "Otro modelo de la misma especie es el principal",
+                               cat["uso_en_analisis"].str.replace("^No: ", "", regex=True)))
+    t = pd.DataFrame({
+        "Modelo": cat["id_modelo"], "Archivo": cat["archivo_original"],
+        "Especie científica": cat["nombre_cientifico"].where(cat["nombre_cientifico"] != "", "Pendiente"),
+        "Estado": np.where(cat["estado_identificacion"] == PENDIENTE, "Sin identificar", "Identificado"),
+        "Modelo principal": np.where(cat["modelo_principal"] == "Sí", "Sí", "No"),
+        "Motivo": motivo,
+        "Validación": cat["estado_validacion"].where(cat["estado_validacion"] != "", "Sin dato"),
+    })
+    return t.sort_values(["Estado", "Especie científica", "Modelo principal", "Modelo"],
+                         ascending=[True, True, False, True]).reset_index(drop=True)
