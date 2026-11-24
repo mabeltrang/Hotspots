@@ -980,9 +980,8 @@ def tarjetas(items):
                    for k, v in items)
     st.markdown(f'<div class="metric-grid">{html}</div>', unsafe_allow_html=True)
 
-tab_mapa, tab_consulta, tab_sdm, tab_tiempo, tab_detalle, tab_metodo = st.tabs(
-    ["Mapa de hotspots", "Consulta por predio", "Distribución modelada", "Multitemporal", "Municipios y especies",
-     "Método"])
+tab_mapa, tab_consulta, tab_sdm, tab_detalle, tab_metodo = st.tabs(
+    ["Mapa de hotspots", "Consulta por predio", "Distribución modelada", "Municipios y especies", "Método"])
 
 pred_sdm, met_sdm, info_sdm = cargar_sdm(depto, firma_sdm(depto))
 
@@ -1032,13 +1031,41 @@ def leyenda_sdm(texto_bajo, texto_alto, con_hotspot):
         <span style="margin-left:16px;display:inline-block;width:14px;height:14px;background:rgba(200,200,200,.45);border:1px solid #999"></span>
         <span>Sin hábitat idóneo o sin predicción</span></div>""", unsafe_allow_html=True)
 
+def linea_de_tiempo(datos):
+    """Interruptor sobre el mapa para limitar los registros a un rango de años (como en Google Earth).
+
+    Devuelve los datos filtrados y el rango elegido (None si está apagado). Los registros sin año
+    (por ejemplo, los inventarios Unergy) quedan fuera mientras está activo.
+    """
+    anios = datos["year"].dropna()
+    c1, c2 = st.columns([1, 3], vertical_alignment="center")
+    activo = c1.toggle("🕒 Línea de tiempo", key="linea_tiempo", disabled=anios.empty,
+                       help="Muestra el mapa solo con los registros del periodo elegido."
+                            + (" Los registros seleccionados no tienen año." if anios.empty else ""))
+    if not activo:
+        return datos, None
+    a_min, a_max = int(anios.min()), int(anios.max())
+    rango = c2.slider("Años", a_min, a_max, (max(a_min, 2015), a_max), key="rango_anios",
+                      label_visibility="collapsed")
+    sin_anio = datos["year"].isna().sum()
+    if sin_anio:
+        st.caption(f"{sin_anio:,} registros sin año (por ejemplo, inventarios Unergy) no se muestran "
+                   "mientras la línea de tiempo está activa.")
+    filtrados = datos[datos["year"].between(*rango)]
+    if filtrados.empty:
+        st.warning("No hay registros en ese periodo; se muestra el mapa con todos los años.")
+        return datos, None
+    return filtrados, rango
+
+
 with tab_mapa:
-    tabla, capas = construir(df)
+    df_mapa, rango_anios = linea_de_tiempo(df)
+    tabla, capas = construir(df_mapa)
     hot = tabla[tabla["nivel"] == "Hotspot"]
     unidad_txt = "hexágonos" if unidad == "Hexágonos" else "municipios"
     mpios_hot = hot["municipio"].dropna().value_counts()
     items = [
-        ("Especies registradas", f"{df['species'].nunique():,}"),
+        ("Especies registradas", f"{df_mapa['species'].nunique():,}"),
         (f"Hotspots ({unidad_txt})", f"{len(hot):,}"),
         ("Municipio con más hotspots" if unidad == "Hexágonos" else "Municipio con mayor riqueza",
          mpios_hot.index[0] if len(mpios_hot) and unidad == "Hexágonos"
@@ -1058,13 +1085,14 @@ with tab_mapa:
                          key="forma_descarga",
                          help="Unidos: los hexágonos (o municipios) hotspot vecinos se funden en un solo "
                               "polígono. Separados: una geometría por hexágono o municipio.")
-        polis = hotspots_a_poligonos(tabla, df, depto, unidad, res, unidos=forma == "Polígonos unidos",
+        polis = hotspots_a_poligonos(tabla, df_mapa, depto, unidad, res, unidos=forma == "Polígonos unidos",
                                      proteccion=union_sel, capas=capas_disp, seleccion=capas_sel)
         desc = (f"Hotspots de biodiversidad en {depto.title()} (Unergy). Unidad: {unidad.lower()}"
                 f"{'' if unidad == 'Municipios' else f', {TAMANO_CELDA[res]}'}; top {int(pct_hot*100)} % de riqueza "
                 f"({metrica.lower()}). "
                 f"Grupos: {', '.join(grupos_sel)}. Fuente: {', '.join(fuentes_sel)}. Origen: {', '.join(origen_sel)}. "
                 f"Amenaza: {', '.join(cats_sel) if cats_sel else 'todas'}."
+                + (f" Años: {rango_anios[0]} a {rango_anios[1]}." if rango_anios else "")
                 + (f" Capas de conservación: {', '.join(capas_sel)}." if capas_sel else ""))
         base = f"hotspots_{depto}_{'hex' if unidad == 'Hexágonos' else 'municipios'}"
         st.caption(f"{len(polis)} polígono(s), {sum(p['area_km2'] for p in polis):,.1f} km² en total. "
@@ -1234,31 +1262,6 @@ with tab_sdm:
                        "modelo predice zonas que no usó para entrenar (0,5 = azar, 1 = perfecto; desde 0,7 es "
                        "aceptable). Hábitat idóneo protegido: parte del hábitat idóneo dentro de las capas de "
                        "conservación elegidas.")
-
-with tab_tiempo:
-    st.write("Compara cómo cambia el mapa según el periodo de los registros.")
-    anios = df["year"].dropna()
-    if anios.empty:
-        st.info("Los registros seleccionados no tienen año (por ejemplo, los inventarios Unergy), "
-                "así que no se puede comparar por periodo. Activa también GBIF para ver esta pestaña.")
-    else:
-        periodo = st.radio("Periodo", ["Antes de 2000", "2000 a 2014", "2015 en adelante", "Personalizado"],
-                           index=2, horizontal=True)
-        rangos = {"Antes de 2000": (int(anios.min()), 1999), "2000 a 2014": (2000, 2014),
-                  "2015 en adelante": (2015, int(anios.max()))}
-        if periodo == "Personalizado":
-            rango = st.slider("Años", int(anios.min()), int(anios.max()), (2015, int(anios.max())))
-        else:
-            rango = rangos[periodo]
-        sub = df[df["year"].between(*rango)]
-        if sub.empty:
-            st.info("No hay registros en ese periodo.")
-        else:
-            t_sub, capas_sub = construir(sub)
-            st.caption(f"{rango[0]} a {rango[1]}: {sub['species'].nunique():,} especies, "
-                       f"{(t_sub['nivel'] == 'Hotspot').sum()} hotspots.")
-            dibujar_mapa(capas_sub, depto, nombres_mpio, capas_extra(), alto=560)
-            leyenda(pct_hot, umbral, metrica, cob_min, bool(capas_sel))
 
 with tab_detalle:
     st.subheader("Especies por municipio")

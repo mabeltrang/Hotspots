@@ -79,6 +79,29 @@ de conservación que toca y un texto de resumen para el informe.
 La app muestra la pestaña *Distribución modelada* (riqueza modelada y mapa por especie) y, en la
 consulta por predio, las especies con hábitat idóneo que no tienen registros en el área.
 
+## Listas completas de eBird (esfuerzo y completitud de aves)
+
+Las presencias de eBird ya vienen en la descarga de GBIF. Este paso no agrega registros: usa las
+listas completas de eBird para medir qué tan completo está el inventario de aves en cada hexágono
+(Chao2) y con qué frecuencia se reporta cada especie.
+
+1. Pedir permiso de uso a ebird@cornell.edu (los términos de eBird no permiten uso comercial sin él).
+2. En https://ebird.org/data/download pedir Colombia → Cesar (CO-CES) con
+   *Include sampling event data*. Guardar los dos .txt (o el .zip) en `data/crudos/`.
+3. Editar `RUTA_EBD`, `RUTA_SAMPLING`, `DEPTO` y `VERSION_EBD` al inicio de `pipeline/07_ebird_listas.py`.
+4. `python pipeline/07_ebird_listas.py` y subir `ebird_celdas.parquet`, `ebird_frecuencia.parquet`
+   y `ebird_info.json` de `data/procesados/<departamento>/`.
+
+## Modelos de BioModelos (Instituto Humboldt)
+
+Mapas de distribución revisados por expertos. Se descargan uno por uno desde la ficha de cada
+especie en https://biomodelos.humboldt.org.co (con cuenta gratuita).
+
+1. Descargar el modelo aprobado de cada especie (empezar por las amenazadas) y guardarlo en
+   `data/crudos/biomodelos/` con el nombre científico al inicio del archivo (`Ateles_hybridus.zip`).
+2. `pip install rasterio` y `python pipeline/08_biomodelos.py`.
+3. Subir `biomodelos.parquet` y `biomodelos_resumen.csv` de `data/procesados/<departamento>/`.
+
 ## Actualizar GBIF o agregar otro departamento
 
 1. Descargar de GBIF (formato Simple) y guardar el CSV o zip en `data/crudos/`
