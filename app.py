@@ -7,6 +7,8 @@ Datos:   data/procesados/<departamento>/registros.parquet  (pipeline/01_procesar
          data/car/*.xlsx                                    (árboles de resoluciones de la CAR, opcional)
          data/limites/municipios_colombia.geojson           (DANE, MGN 2018)
          data/capas/<departamento>/*.geojson                (áreas protegidas, opcional; pipeline/05)
+         data/biomodelos/entrada/*.tif|*.zip                (modelos de BioModelos, opcional; ver
+                                                             data/biomodelos/LEEME.md)
 """
 import io
 import json
@@ -25,6 +27,7 @@ from shapely.geometry import Polygon, mapping, shape
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
+import biomodelos as bm
 from comun import GRUPOS, ORDEN_GRUPOS, aplicar_sinonimos
 from geodatos import FORMATOS, a_plano, a_wgs84, leer_vector
 from unergy import cargar_unergy, normalizar_texto
@@ -980,16 +983,108 @@ def tarjetas(items):
                    for k, v in items)
     st.markdown(f'<div class="metric-grid">{html}</div>', unsafe_allow_html=True)
 
-tab_mapa, tab_consulta, tab_sdm, tab_detalle, tab_metodo = st.tabs(
-    ["Mapa de hotspots", "Consulta por predio", "Distribución modelada", "Municipios y especies", "Método"])
+tab_mapa, tab_consulta, tab_bm, tab_sdm, tab_detalle, tab_metodo = st.tabs(
+    ["Mapa de hotspots", "Consulta por predio", "BioModelos", "Modelos propios", "Municipios y especies", "Método"])
 
 pred_sdm, met_sdm, info_sdm = cargar_sdm(depto, firma_sdm(depto))
+
+
+# ================================================================ BioModelos
+@st.cache_data(show_spinner="Revisando los modelos de BioModelos…")
+def preparar_biomodelos(depto, firma):
+    """Procesa los GeoTIFF nuevos de data/biomodelos/entrada/ y carga catálogo y hexágonos.
+    firma cambia cuando cambian los archivos de entrada o los metadatos."""
+    avisos = []
+    try:
+        resumen = bm.actualizar(deptos=[depto], avisar=avisos.append)
+    except Exception as e:  # p. ej. sin permiso de escritura: se muestra lo que ya estaba procesado
+        resumen = {"error": f"{type(e).__name__}: {e}"}
+    cat, h = bm.cargar(depto)
+    return cat, h, resumen, avisos
+
+
+cat_bm, h_bm, resumen_bm, avisos_bm = preparar_biomodelos(depto, bm.firma_entrada())
+MADS_TODAS = (pd.read_csv(CARPETA_LISTAS / "amenazadas_mads_0126.csv").drop_duplicates("species")
+              .set_index("species")["categoria"] if (CARPETA_LISTAS / "amenazadas_mads_0126.csv").exists() else pd.Series(dtype=str))
+
+
+def es_validado(serie):
+    t = serie.fillna("").map(normalizar_texto)
+    return t.str.contains("valid") & ~t.str.contains("no valid|sin valid")
+
+
+def especies_validadas_bm():
+    """Especies con un modelo validado de BioModelos en uso (para no duplicar con los modelos propios)."""
+    c = cat_bm[(cat_bm["modelo_principal"] == "Sí") & es_validado(cat_bm["estado_validacion"])]
+    return set(c["nombre_cientifico"])
+
+
+def amenaza_bm(especies):
+    """Categorías UICN y MADS de especies modeladas, aunque no tengan registros en el departamento."""
+    t = pd.DataFrame({"species": list(especies)})
+    t = t.join(atributos[["uicn", "mads", "grupo", "family"]], on="species")
+    t["mads"] = t["mads"].fillna(t["species"].map(MADS_TODAS))
+    t["amenazada"] = t["uicn"].isin(AMENAZA) | t["mads"].isin(AMENAZA)
+    return t.set_index("species")
+
+
+def presencias_bm(res_h3, cob, solo_validados=False, solo_amenazadas=False):
+    p = bm.presencias(cat_bm, h_bm, res_h3, cob)
+    if solo_validados:
+        val = cat_bm[es_validado(cat_bm["estado_validacion"])]["id_modelo"]
+        p = p[p["id_modelo"].isin(val)]
+    if solo_amenazadas and len(p):
+        am = amenaza_bm(p["species"].unique())
+        p = p[p["species"].isin(am.index[am["amenazada"]])]
+    return p
+
+
+def bm_en_zona(zona, especies_registradas):
+    """Especies con distribución potencial (BioModelos) en la zona; marca si tienen registros en ella."""
+    celdas = set(h3.geo_to_cells(zona.__geo_interface__, 7))
+    c = zona.centroid
+    celdas.add(h3.latlng_to_cell(c.y, c.x, 7))
+    p = bm.presencias(cat_bm, h_bm, 7, 0)
+    p = p[p["h3"].isin(celdas)]
+    if p.empty:
+        return pd.DataFrame()
+    t = p.groupby("species").agg(modelo=("id_modelo", "first"), cobertura=("fraccion", "max")).reset_index()
+    am = amenaza_bm(t["species"])
+    info = cat_bm.set_index("id_modelo")
+    t = t.assign(
+        Grupo=t["species"].map(am["grupo"]), UICN=t["species"].map(am["uicn"]), MADS=t["species"].map(am["mads"]),
+        Amenazada=t["species"].map(am["amenazada"]).fillna(False),
+        Validado=es_validado(t["modelo"].map(info["estado_validacion"])).map({True: "Sí", False: "Sin dato"}),
+        **{"Registrada en el área": t["species"].isin(especies_registradas)})
+    t["cobertura"] = (t["cobertura"] * 100).round(0).astype(int).astype(str) + " %"
+    t = t.rename(columns={"species": "Especie", "modelo": "Modelo", "cobertura": "Máx. % del hexágono"})
+    return t.sort_values(["Registrada en el área", "Amenazada", "Especie"], ascending=[True, False, True])
+
+
+def etiqueta_modelo(r):
+    nombre = r["nombre_cientifico"] or "especie pendiente de identificar"
+    marca = " ✔ validado" if es_validado(pd.Series([r["estado_validacion"]])).iloc[0] else ""
+    return f"{r['id_modelo']} · {nombre} ({r['archivo_original']}){marca}"
+
+
+CUADRANTES = {  # (potencial alto, registros suficientes) -> nombre, color, explicación
+    (True, False): ("Potencial alto, pocos registros", "#D73027",
+                    "Vacío de información prioritario: muchas especies posibles y casi nadie ha muestreado."),
+    (True, True): ("Potencial alto, muchos registros", "#1A9850",
+                   "Zona importante y conocida: el potencial está respaldado por muestreo."),
+    (False, True): ("Potencial bajo, muchos registros", "#4575B4",
+                    "Zona bien muestreada con menos especies modeladas (o especies sin modelo todavía)."),
+    (False, False): ("Potencial bajo, pocos registros", "#BDBDBD",
+                     "Menor prioridad con la información actual."),
+}
 
 
 def especies_modeladas(con_amenaza=True):
     """Métricas de las especies válidas que cumplen los filtros de grupo, origen y (opcional) amenaza."""
     auc_min = st.session_state.get("auc_min_sdm", 0.7)
     m = met_sdm[met_sdm["valido"] & (met_sdm["auc_espacial"] >= auc_min)].drop(columns="grupo")
+    if st.session_state.get("ocultar_validados_bm", True):
+        m = m[~m["species"].isin(especies_validadas_bm())]  # si hay modelo validado, manda BioModelos
     m = m.join(atributos, on="species", how="inner")
     m = m[m["grupo"].isin(grupos_sel) & m["origen"].isin(origen_sel)]
     if con_amenaza and cats_sel:
@@ -1158,6 +1253,15 @@ with tab_consulta:
                         f"sin registros en el área" + (f", de ellas {len(amen_n)} amenazadas: "
                         + "; ".join(f"{r.Especie} ({categorias_txt(r.UICN, r.MADS)})" for r in amen_n.head(10).itertuples())
                         if len(amen_n) else "") + "; su presencia debe verificarse en campo.")
+        mod_bm = bm_en_zona(consulta["zona"], set(sp["Especie"])) if len(h_bm) else pd.DataFrame()
+        if len(mod_bm):
+            nuevas_bm = mod_bm[~mod_bm["Registrada en el área"]]
+            amen_bm = nuevas_bm[nuevas_bm["Amenazada"]]
+            resumen += (f" Según los modelos de BioModelos (Instituto Humboldt) cargados, el área está dentro de la "
+                        f"distribución potencial de {len(mod_bm)} especie(s), {len(nuevas_bm)} sin registros en el área"
+                        + (f", entre ellas {len(amen_bm)} amenazada(s): " + "; ".join(
+                            f"{r.Especie} ({categorias_txt(r.UICN, r.MADS)})" for r in amen_bm.head(10).itertuples())
+                           if len(amen_bm) else "") + "; es distribución potencial, no presencia confirmada.")
         st.markdown("#### Resumen")
         st.text_area("Texto para el informe o concepto técnico", resumen, height=190, key="resumen_predio")
         if not consulta["areas"].empty:
@@ -1168,12 +1272,223 @@ with tab_consulta:
                      column_config={"iNaturalist": st.column_config.LinkColumn(display_text="ver")})
         st.download_button("⬇ Descargar lista de especies (CSV)", sp.to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"especies_{Path(archivo_predio.name).stem}.csv", mime="text/csv")
+        if len(mod_bm):
+            st.markdown("#### Especies con distribución potencial según BioModelos")
+            st.caption("Modelos del Instituto Humboldt cargados en la app (pestaña BioModelos). Primero las especies "
+                       "sin registros en el área y, entre ellas, las amenazadas. Indican posible presencia, no la confirman.")
+            st.dataframe(mod_bm, hide_index=True, width="stretch")
         if len(mod):
-            st.markdown("#### Especies con hábitat idóneo según los modelos")
+            st.markdown("#### Especies con hábitat idóneo según los modelos propios (exploratorio)")
             st.caption("Especies que probablemente están en el área por clima, relieve y cobertura, aunque no tengan "
                        "registros ahí. Primero las que no tienen registros y, entre ellas, las amenazadas. Son "
                        "predicciones: sirven para orientar la caracterización en campo.")
             st.dataframe(mod, hide_index=True, width="stretch")
+
+with tab_bm:
+    if "error" in resumen_bm:
+        st.error(f"No se pudieron procesar los modelos nuevos: {resumen_bm['error']}")
+    if cat_bm.empty:
+        st.info("Aún no hay modelos de BioModelos. Sube los GeoTIFF (o un ZIP con ellos) a "
+                "data/biomodelos/entrada/ en GitHub; la app los detecta y procesa sola al reiniciar. "
+                "Instrucciones en data/biomodelos/LEEME.md.")
+    else:
+        if resumen_bm.get("nuevos"):
+            st.success(f"Se incorporaron {resumen_bm['nuevos']} modelo(s) nuevo(s).")
+        if resumen_bm.get("errores"):
+            st.warning(f"{resumen_bm['errores']} archivo(s) no se pudieron leer; ver la columna «mensaje» del catálogo.")
+        principales = cat_bm[cat_bm["modelo_principal"] == "Sí"]
+        con_presencia = set(h_bm["id_modelo"]) if len(h_bm) else set()
+        pendientes = cat_bm[cat_bm["estado_identificacion"] == bm.PENDIENTE]
+        tarjetas([("Modelos en el catálogo", f"{len(cat_bm):,}"),
+                  ("Especies en el análisis", f"{principales['nombre_cientifico'].nunique():,}"),
+                  (f"Con distribución en {depto.title()}", f"{principales['id_modelo'].isin(con_presencia).sum():,}"),
+                  ("Validados por expertos", f"{es_validado(cat_bm['estado_validacion']).sum():,}"),
+                  ("Pendientes de identificar", f"{len(pendientes):,}")])
+        st.caption("Modelos de distribución de BioModelos (Instituto Humboldt): muestran dónde **podría** estar "
+                   "cada especie, no dónde se ha confirmado. Solo cuentan en la riqueza los modelos con especie "
+                   "identificada, y uno por especie (el «principal» del catálogo).")
+        vista_bm = st.radio("Ver", ["Riqueza potencial", "Un modelo", "Potencial vs. registros", "Catálogo"],
+                            horizontal=True, key="vista_bm")
+        if vista_bm != "Catálogo":
+            c1, c2, c3 = st.columns([1.2, 1.5, 1.3])
+            res_bm = c1.select_slider("Tamaño de hexágono", options=[5, 6, 7], key="res_bm",
+                                      value=min(res, 7) if unidad == "Hexágonos" else 7,
+                                      format_func=lambda r: TAMANO_CELDA[r])
+            cob_bm = c2.slider("Parte mínima del hexágono dentro de la distribución", 0, 100, 10, 5, key="cob_bm",
+                               format="%d %%", help="Un hexágono cuenta para una especie si al menos este porcentaje "
+                                                    "de su área está dentro del modelo. 0 = basta con que lo toque.") / 100
+            solo_val = c3.checkbox("Solo modelos validados", key="solo_val_bm",
+                                   help="Según la columna estado_validacion de los metadatos.")
+            solo_am = c3.checkbox("Solo especies amenazadas", key="solo_am_bm", help="UICN o Res. 0126 de 2024 (CR, EN, VU).")
+            pres_bm = presencias_bm(res_bm, cob_bm, solo_val, solo_am)
+
+        if vista_bm == "Riqueza potencial":
+            if pres_bm.empty:
+                st.info(f"Ningún modelo en uso tiene distribución dentro de {depto.title()} con estos filtros.")
+            else:
+                t = pres_bm.groupby("h3").agg(n=("species", "nunique"), lista=("species", lambda x: sorted(set(x)))).reset_index()
+                t["percentil"] = t["n"].rank(pct=True, method="max")
+                t["color"] = colores_escala(t["percentil"], [True] * len(t))
+                mpio = municipio_de_celdas(depto, tuple(t["h3"]))
+                t["nombre"] = t["h3"].map(mpio)
+                t["l1"] = [f"{n} especie(s) con distribución potencial" for n in t["n"]]
+                t["l2"] = [", ".join(x[:4]) + (" …" if len(x) > 4 else "") for x in t["lista"]]
+                t["l3"], t["nivel"], t["vacio"] = "", "", False
+                tarjetas([("Especies en el mapa", f"{pres_bm['species'].nunique():,}"),
+                          ("Máximo por hexágono", f"{t['n'].max():,}"),
+                          ("Hexágonos con al menos una", f"{len(t):,}")])
+                dibujar_mapa(capas_hex(t.drop(columns="lista"), False), depto, nombres_mpio, capas_extra())
+                leyenda_sdm("Menos especies", "Más especies", False)
+                st.caption("Riqueza potencial = número de especies cuyo modelo de BioModelos cubre el hexágono. "
+                           "Es otra variable que la riqueza registrada del mapa principal: aquí no entra ningún registro. "
+                           "Con pocos modelos cargados, el mapa refleja solo esas especies.")
+
+        elif vista_bm == "Un modelo":
+            opciones = cat_bm.sort_values(["estado_identificacion", "nombre_cientifico", "id_modelo"])
+            id_sel = st.selectbox("Modelo", list(opciones["id_modelo"]), key="modelo_bm",
+                                  format_func=lambda i: etiqueta_modelo(cat_bm.set_index("id_modelo").loc[i].to_dict() | {"id_modelo": i}))
+            r = cat_bm.set_index("id_modelo").loc[id_sel]
+            especie = r["nombre_cientifico"]
+            if r["estado_identificacion"] == bm.PENDIENTE:
+                st.warning("Especie pendiente de identificar: el modelo se puede ver, pero no cuenta en la riqueza. "
+                           f"Escribe el nombre científico en la fila {id_sel} de data/biomodelos/metadata/metadatos_modelos.csv.")
+            elif r["uso_en_analisis"] != "Sí":
+                st.info(f"Este modelo no entra en la riqueza: {r['uso_en_analisis'][4:]}.")
+            elif r["modelo_principal"] != "Sí":
+                st.info("Hay otro modelo de esta especie marcado como principal; este se muestra pero no se suma.")
+            hm = h_bm[(h_bm["id_modelo"] == id_sel) & (h_bm["res"] == res_bm)] if len(h_bm) else pd.DataFrame()
+            tarjetas([("Especie", especie or "Pendiente"),
+                      ("Tipo de modelo", r["tipo_valores"] or "-"),
+                      ("Validación", r["estado_validacion"] or "Sin dato"),
+                      (f"Hexágonos en {depto.title()}", f"{len(hm):,}")])
+            ver = st.radio("Mapa", [f"{depto.title()} (hexágonos)", "Extensión completa del modelo"],
+                           horizontal=True, key="mapa_modelo_bm")
+            if ver.startswith(depto.title()):
+                if hm.empty:
+                    st.info(f"El modelo no tiene distribución dentro de {depto.title()}"
+                            + (" (o es continuo sin umbral, o categórico)." if r["tipo_valores"] not in bm.BINARIOS else "."))
+                else:
+                    continuo = r["tipo_valores"] in bm.CONTINUOS and "valor_medio" in hm and hm["valor_medio"].notna().any()
+                    valor = hm["valor_medio"] if continuo else hm["fraccion"]
+                    hm = hm.assign(h3=hm["h3"], color=colores_escala(valor.rank(pct=True), [True] * len(hm)),
+                                   nombre=especie or id_sel, nivel="", vacio=False, l3="",
+                                   l1=[f"Valor medio {v:.3g}" if continuo else f"{v:.0%} del hexágono dentro del modelo" for v in valor],
+                                   l2="Continuo: idoneidad/probabilidad" if continuo else r["tipo_valores"])
+                    extra = []
+                    if especie:
+                        regs = df_todas_fuentes[df_todas_fuentes["species"] == especie]
+                        puntos = pd.DataFrame({"lon": regs["lon"], "lat": regs["lat"], "nombre": especie, "l1": regs["fuente"],
+                                               "l2": regs["year"].map(lambda a: f"{int(a)}" if pd.notna(a) else ""), "l3": ""})
+                        extra = [pdk.Layer("ScatterplotLayer", data=puntos, get_position=["lon", "lat"],
+                                           get_fill_color=[20, 20, 20, 220], get_radius=60, radius_min_pixels=3, stroked=True,
+                                           get_line_color=[255, 255, 255], line_width_min_pixels=0.8, pickable=True)]
+                        st.caption(f"Puntos negros: {len(regs):,} registros de la especie en el departamento (todas las fuentes).")
+                    dibujar_mapa(capas_hex(hm, False), depto, nombres_mpio, capas_extra() + extra)
+                    leyenda_sdm("Valor bajo" if continuo else "Poca área del hexágono",
+                                "Valor alto" if continuo else "Todo el hexágono", False)
+            else:
+                img = bm.vista_base64(id_sel)
+                if img is None or not r["oeste"]:
+                    st.info("No hay vista previa de este modelo (¿falló la lectura?).")
+                else:
+                    o, s_, e, n_ = (float(r[k]) for k in ("oeste", "sur", "este", "norte"))
+                    capa_img = pdk.Layer("BitmapLayer", image=pdk.types.String(img), bounds=[o, s_, e, n_], opacity=0.85)
+                    vista_n = pdk.ViewState(latitude=(s_ + n_) / 2, longitude=(o + e) / 2,
+                                            zoom=max(2.0, min(8.0, 9.3 - math.log2(max(e - o, n_ - s_, 0.1)))))
+                    dibujar_mapa([capa_img], depto, False, alto=560, vista=vista_n)
+                    st.caption("Morado: dentro de la distribución modelada. El recuadro gris es el departamento. "
+                               "Vista liviana (≈700 px de ancho): para detalle, abre el GeoTIFF original en QGIS.")
+            with st.expander("Características técnicas y metadatos"):
+                campos = ["archivo_original", "ruta_entrada", "archivos_identicos", "nombre_cientifico", "estado_identificacion",
+                          "familia", "nivel_modelo", "estado_validacion", "calificacion_expertos", "licencia", "fuente",
+                          "version_fecha", "tipo_valores", "valores_presentes", "nodata", "tratamiento_nodata", "crs",
+                          "resolucion", "resolucion_km", "ancho", "alto", "bandas", "tipo_dato", "oeste", "sur", "este",
+                          "norte", "area_presencia_km2", "etiqueta_interna", "umbral_aplicado", "uso_en_analisis",
+                          "modelo_principal", "estado_procesamiento", "mensaje", "fecha_incorporacion"]
+                st.dataframe(pd.DataFrame({"Campo": campos, "Valor": [str(r.get(c, "")) for c in campos]}),
+                             hide_index=True, width="stretch")
+
+        elif vista_bm == "Potencial vs. registros":
+            _, _, contorno = cargar_municipios(depto)
+            col = f"h3_{res_bm}"
+            # Hexágonos con centro dentro del departamento + los del borde que tocan modelos o registros
+            todas = pd.DataFrame({"h3": sorted(set(h3.geo_to_cells(contorno.__geo_interface__, res_bm))
+                                               | set(pres_bm["h3"]) | set(df[col].dropna()))})
+            pot = pres_bm.groupby("h3")["species"].agg(["nunique", lambda x: set(x)]).set_axis(["potencial", "esp_mod"], axis=1)
+            regs = df.groupby(col).agg(registros=("species", "size"), observadas=("species", "nunique"))
+            obs_sets = df_todas_fuentes.groupby(col)["species"].agg(set)
+            t = todas.join(pot, on="h3").join(regs, on="h3")
+            t[["potencial", "registros", "observadas"]] = t[["potencial", "registros", "observadas"]].fillna(0).astype(int)
+            t["confirmadas"] = [len(m & obs_sets.get(h, set())) if isinstance(m, set) else 0
+                                for h, m in zip(t["h3"], t["esp_mod"])]
+            if t["potencial"].max() == 0:
+                st.info(f"Ningún modelo en uso tiene distribución dentro de {depto.title()} con estos filtros.")
+            else:
+                n_esp = pres_bm["species"].nunique()
+                if n_esp < 10:
+                    st.warning(f"Solo {n_esp} especie(s) modelada(s) con distribución en {depto.title()}: el cruce "
+                               "todavía es ilustrativo. Gana sentido cuando haya decenas de modelos cargados.")
+                min_reg = {5: 50, 6: 20, 7: 10}[res_bm]
+                corte = float(t.loc[t["potencial"] > 0, "potencial"].median())
+                c1, c2 = st.columns(2)
+                corte = c1.number_input("Potencial alto desde (especies)", 1, int(t["potencial"].max()),
+                                        max(1, int(math.ceil(corte))), key=f"corte_bm_{res_bm}",
+                                        help="Por defecto, la mediana de los hexágonos con al menos una especie modelada.")
+                min_reg = c2.number_input("Muchos registros desde", 1, 1000, min_reg, key=f"minreg_bm_{res_bm}",
+                                          help="Por defecto, el mismo mínimo que usa el mapa principal para evaluar una unidad.")
+                t["cuadrante"] = [CUADRANTES[(p >= corte, n >= min_reg)][0] for p, n in zip(t["potencial"], t["registros"])]
+                colores = {v[0]: hex_a_rgb(v[1]) + [200] for v in CUADRANTES.values()}
+                t["color"] = t["cuadrante"].map(colores)
+                mpio = municipio_de_celdas(depto, tuple(t["h3"]))
+                t["nombre"] = t["cuadrante"]
+                t["municipio"] = t["h3"].map(mpio)
+                t["l1"] = [f"Potencial: {p} especie(s) modeladas · {c} con registros aquí" for p, c in zip(t["potencial"], t["confirmadas"])]
+                t["l2"] = [f"Registros: {n:,} ({o} especies observadas, filtros de la barra lateral)" for n, o in zip(t["registros"], t["observadas"])]
+                t["l3"] = t["municipio"]
+                t["nivel"], t["vacio"] = "", False
+                conteo = t["cuadrante"].value_counts()
+                tarjetas([(v[0], f"{conteo.get(v[0], 0):,} hexágonos") for v in CUADRANTES.values()])
+                dibujar_mapa(capas_hex(t.drop(columns="esp_mod"), False), depto, nombres_mpio, capas_extra())
+                st.markdown(" ".join(f'<span style="display:inline-block;width:14px;height:14px;background:{c};'
+                                     f'border:1px solid #888;margin:0 4px 0 12px;vertical-align:middle"></span>{n}'
+                                     for n, c, _ in CUADRANTES.values()), unsafe_allow_html=True)
+                with st.expander("Cómo leer este mapa"):
+                    for n, _, txt in CUADRANTES.values():
+                        st.markdown(f"- **{n}.** {txt}")
+                    st.markdown("Las dos variables se cuentan por separado: la riqueza **potencial** sale solo de los "
+                                "modelos y los **registros** solo de GBIF, Unergy y CAR. «Con registros aquí» indica "
+                                "cuántas de las especies modeladas ya fueron registradas en ese hexágono.")
+                vacios = t[t["cuadrante"] == CUADRANTES[(True, False)][0]].sort_values("potencial", ascending=False)
+                if len(vacios):
+                    st.markdown("#### Vacíos de información prioritarios")
+                    st.dataframe(vacios[["h3", "municipio", "potencial", "confirmadas", "registros"]].rename(columns={
+                        "h3": "Hexágono", "municipio": "Municipio", "potencial": "Especies modeladas",
+                        "confirmadas": "De ellas con registro", "registros": "Registros"}), hide_index=True, width="stretch")
+                st.download_button("⬇ Descargar tabla de hexágonos (CSV)",
+                                   t.drop(columns=["esp_mod", "color", "nombre", "l1", "l2", "l3", "nivel", "vacio"])
+                                   .to_csv(index=False).encode("utf-8-sig"),
+                                   file_name=f"biomodelos_potencial_vs_registros_{depto}_res{res_bm}.csv", mime="text/csv")
+
+        else:  # Catálogo
+            cols = ["id_modelo", "nombre_cientifico", "estado_identificacion", "archivo_original", "tipo_valores",
+                    "estado_validacion", "nivel_modelo", "calificacion_expertos", "licencia", "uso_en_analisis",
+                    "modelo_principal", "estado_procesamiento", "mensaje"]
+            st.dataframe(cat_bm[cols], hide_index=True, width="stretch")
+            st.download_button("⬇ Descargar catálogo completo (CSV)", cat_bm.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="catalogo_modelos.csv", mime="text/csv")
+            with st.expander("Cómo completar los datos de un modelo (especie, validación, licencia…)"):
+                st.markdown("""
+1. En GitHub abre `data/biomodelos/metadata/metadatos_modelos.csv` y pulsa el lápiz (editar).
+2. Busca la fila del modelo por su `id_modelo` (por ejemplo `MODELO_003`) y escribe lo que sepas:
+   `nombre_cientifico`, `familia`, `nivel_modelo`, `estado_validacion` (p. ej. *Validado*),
+   `calificacion_expertos`, `licencia`, `fuente`, `version_fecha`, `cita`.
+3. Opcionales: `umbral` (solo modelos continuos: valor desde el cual se considera presencia, según la
+   ficha del modelo) y `usar_en_analisis` (*si* para elegirlo como principal de su especie, *no* para excluirlo).
+4. Guarda (Commit). La app actualiza el catálogo al reiniciar. Lo que dejes vacío queda como «sin dato».
+""")
+            if avisos_bm:
+                with st.expander("Registro de la última carga"):
+                    st.text("\n".join(avisos_bm))
 
 with tab_sdm:
     if pred_sdm is None:
@@ -1181,6 +1496,11 @@ with tab_sdm:
                 "pipeline/gee_covariables.js (variables ambientales en Google Earth Engine) y "
                 "pipeline/06_modelos_distribucion.py; ver el README.")
     else:
+        st.info("Modelos propios, **exploratorios**: estadísticos y sin revisión de expertos. Para las especies que "
+                "tienen modelo validado en BioModelos se usa ese (pestaña BioModelos).")
+        st.checkbox("Ocultar especies que ya tienen modelo validado en BioModelos", value=True, key="ocultar_validados_bm",
+                    help=f"Hoy hay {len(especies_validadas_bm())} especie(s) con modelo validado cargado. "
+                         "También se aplica en la consulta por predio.")
         st.slider("Confiabilidad mínima del modelo (AUC espacial)", 0.70, 0.95, 0.70, 0.05, key="auc_min_sdm",
                   help="Subirlo deja solo las especies cuyos modelos predicen mejor zonas que no usaron para "
                        "entrenar. 0,7 aceptable, 0,8 bueno, 0,9 excelente. También se aplica en la consulta por predio.")
@@ -1330,6 +1650,21 @@ validado con bloques espaciales; solo se muestran las especies con AUC espacial 
 hexágonos con condiciones fuera del rango muestreado no se predicen. Una especie está en un
 hexágono si la idoneidad supera el percentil 10 de sus presencias. La riqueza modelada es la
 suma de especies presentes; es una predicción y no reemplaza el muestreo en campo.
+
+**BioModelos.** Modelos de distribución del Instituto Humboldt (biomodelos.humboldt.org.co) que se
+cargan en data/biomodelos/entrada/. Cada GeoTIFF se inspecciona (sistema de coordenadas, resolución,
+NoData y valores) y se clasifica: *binario solo presencia* (1 = dentro de la distribución; lo demás es
+NoData), *binario 0/1*, *continuo* (idoneidad o probabilidad) o *categórico*. Los continuos no se
+convierten a presencia salvo que sus metadatos traigan un umbral. Cada modelo se pasa a hexágonos H3
+con los centros de sus píxeles dentro del departamento; un hexágono cuenta para la especie si la parte
+de su área dentro del modelo supera el mínimo elegido. La riqueza potencial suma especies, no archivos:
+solo modelos con especie identificada y uno por especie (el elegido en los metadatos o, si no, el
+validado, de mayor nivel y calificación). Es distribución **potencial**: no confirma presencia y se
+cuenta aparte de la riqueza registrada. Cita: la que indique la ficha de cada modelo (columna «cita»
+del catálogo); Velásquez-Tibatá et al. (2019) PLoS ONE 14(3): e0214522 para la plataforma.
+
+**Modelos propios.** Ver «Distribución modelada» abajo. Son exploratorios y, por defecto, no se
+muestran para las especies que ya tienen modelo validado en BioModelos.
 
 **Grupos.** Aves, mamíferos, herpetos (reptiles y anfibios), invertebrados (insectos,
 arácnidos y otros) y flora. Con *Comparar grupos: por separado* (recomendado), la métrica se

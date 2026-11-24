@@ -13,6 +13,9 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+`requirements.txt` incluye `rasterio` (lectura de GeoTIFF) y `pillow` (vistas previas); en
+Streamlit Cloud se instalan solos.
+
 En Streamlit Cloud: Main file path = `app.py`.
 
 ## Agregar inventarios de Unergy
@@ -76,8 +79,9 @@ de conservación que toca y un texto de resumen para el informe.
 3. Subir a `data/procesados/cesar/` los tres archivos que descarga: `sdm_idoneidad.parquet`,
    `sdm_metricas.csv` y `sdm_info.json`.
 
-La app muestra la pestaña *Distribución modelada* (riqueza modelada y mapa por especie) y, en la
-consulta por predio, las especies con hábitat idóneo que no tienen registros en el área.
+La app muestra la pestaña *Modelos propios* (riqueza modelada y mapa por especie) y, en la
+consulta por predio, las especies con hábitat idóneo que no tienen registros en el área. Son
+modelos exploratorios: cuando una especie tiene modelo validado en BioModelos, manda ese.
 
 ## Listas completas de eBird (esfuerzo y completitud de aves)
 
@@ -94,13 +98,27 @@ listas completas de eBird para medir qué tan completo está el inventario de av
 
 ## Modelos de BioModelos (Instituto Humboldt)
 
-Mapas de distribución revisados por expertos. Se descargan uno por uno desde la ficha de cada
-especie en https://biomodelos.humboldt.org.co (con cuenta gratuita).
+Mapas de distribución de BioModelos, revisados por expertos. **No hay que correr nada ni editar
+código para agregar especies**: se suben los GeoTIFF a `data/biomodelos/entrada/` y la app los
+detecta, los procesa y los suma a la pestaña *BioModelos*. Guía paso a paso, estructura de
+carpetas y qué significa cada columna del catálogo: [`data/biomodelos/LEEME.md`](data/biomodelos/LEEME.md).
 
-1. Descargar el modelo aprobado de cada especie (empezar por las amenazadas) y guardarlo en
-   `data/crudos/biomodelos/` con el nombre científico al inicio del archivo (`Ateles_hybridus.zip`).
-2. `pip install rasterio` y `python pipeline/08_biomodelos.py`.
-3. Subir `biomodelos.parquet` y `biomodelos_resumen.csv` de `data/procesados/<departamento>/`.
+Resumen:
+
+1. Subir los GeoTIFF (o un ZIP con varios) a `data/biomodelos/entrada/`, con su nombre original.
+2. Reiniciar la app (Streamlit Cloud: *Manage app → Reboot*). Se procesan solo los archivos nuevos.
+3. Completar lo que se sepa de cada modelo (especie, validación, licencia…) en
+   `data/biomodelos/metadata/metadatos_modelos.csv`.
+
+Opcional, en el computador o en Colab: `python pipeline/08_biomodelos.py` hace lo mismo que la app
+y muestra qué modelos faltan por identificar; luego se suben a GitHub las carpetas
+`data/biomodelos/catalogo/`, `metadata/` y `procesados/`.
+
+La pestaña muestra la riqueza potencial (especies cuyo modelo cubre cada hexágono), cada modelo por
+separado (en el departamento y en toda su extensión), el cruce entre riqueza potencial y registros
+(vacíos de información) y el catálogo. La consulta por predio lista además las especies con
+distribución potencial en el área. Los modelos propios (*pipeline/06*) quedan como información
+exploratoria y, por defecto, se ocultan para las especies con modelo validado en BioModelos.
 
 ## Actualizar GBIF o agregar otro departamento
 
@@ -110,7 +128,10 @@ especie en https://biomodelos.humboldt.org.co (con cuenta gratuita).
 3. Correr `python pipeline/01_procesar_gbif.py` desde la carpeta del repo.
 4. Subir `data/procesados/<departamento>/` a GitHub.
 
-## Licencias
+## Licencias y privacidad
+
+El repositorio debe ser **privado**: tiene inventarios de Unergy con coordenadas de proyectos y,
+desde ahora, modelos de BioModelos cuya licencia se debe respetar (ver columna `licencia`).
 
 Cerca del 43 % de los registros GBIF de Cesar son CC BY-NC (uso no comercial).
 Para análisis interno no hay problema; para productos comerciales, filtrar por licencia.
